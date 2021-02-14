@@ -69,6 +69,9 @@ void OTAComponent::handle_() {
   // enable nodelay for outgoing data
   this->client_.setNoDelay(true);
 
+  //TODO: trigger on_start
+  this->on_start_callback_.call();
+
   ESP_LOGD(TAG, "Starting OTA Update from %s...", this->client_.remoteIP().toString().c_str());
   this->status_set_warning();
 
@@ -266,12 +269,14 @@ void OTAComponent::handle_() {
   this->client_.flush();
   this->client_.stop();
   delay(10);
+  //TODO: trigger on_finished
   ESP_LOGI(TAG, "OTA update finished!");
   this->status_clear_warning();
   delay(100);  // NOLINT
   App.safe_reboot();
 
 error:
+  //TODO: trigger on_error
   if (update_started) {
     StreamString ss;
     Update.printError(ss);

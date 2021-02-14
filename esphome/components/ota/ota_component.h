@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "esphome/core/automation.h"
 #include "esphome/core/preferences.h"
 #include <WiFiServer.h>
 #include <WiFiClient.h>
@@ -62,6 +63,10 @@ class OTAComponent : public Component {
 
   void on_safe_shutdown() override;
 
+  void add_on_start_callback(std::function<void()> callback) {
+      this->on_start_callback_.add(std::move(callback));
+  }
+
  protected:
   void write_rtc_(uint32_t val);
   uint32_t read_rtc_();
@@ -82,7 +87,13 @@ class OTAComponent : public Component {
   uint32_t safe_mode_rtc_value_;
   uint8_t safe_mode_num_attempts_;
   ESPPreferenceObject rtc_;
+  CallbackManager<void()> on_start_callback_;
 };
-
+class StartTrigger : public Trigger<> {
+    public:
+      explicit StartTrigger(OTAComponent *parent) {
+        parent->add_on_start_callback([this]() { this->trigger(); });
+      }
+};
 }  // namespace ota
 }  // namespace esphome
