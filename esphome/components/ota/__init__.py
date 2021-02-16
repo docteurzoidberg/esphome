@@ -2,15 +2,21 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_ID, CONF_NUM_ATTEMPTS, CONF_PASSWORD,
-    CONF_PORT, CONF_REBOOT_TIMEOUT, CONF_SAFE_MODE
+    CONF_PORT, CONF_REBOOT_TIMEOUT, CONF_SAFE_MODE,
+    CONF_TRIGGER_ID
 )
 from esphome.core import CORE, coroutine_with_priority
+from esphome import automation
 
 CODEOWNERS = ['@esphome/core']
 DEPENDENCIES = ['network']
 
+CONF_ON_START = 'on_start'
+
 ota_ns = cg.esphome_ns.namespace('ota')
 OTAComponent = ota_ns.class_('OTAComponent', cg.Component)
+StartTrigger = ota_ns.class_('StartTrigger', automation.Trigger.template())
+
 
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(OTAComponent),
@@ -18,7 +24,10 @@ CONFIG_SCHEMA = cv.Schema({
     cv.SplitDefault(CONF_PORT, esp8266=8266, esp32=3232): cv.port,
     cv.Optional(CONF_PASSWORD, default=''): cv.string,
     cv.Optional(CONF_REBOOT_TIMEOUT, default='5min'): cv.positive_time_period_milliseconds,
-    cv.Optional(CONF_NUM_ATTEMPTS, default='10'): cv.positive_not_null_int
+    cv.Optional(CONF_NUM_ATTEMPTS, default='10'): cv.positive_not_null_int,
+    cv.Optional(CONF_ON_START): automation.validate_automation({
+        cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(StartTrigger),
+    }),
 }).extend(cv.COMPONENT_SCHEMA)
 
 
@@ -37,3 +46,7 @@ def to_code(config):
         cg.add_library('Update', None)
     elif CORE.is_esp32:
         cg.add_library('Hash', None)
+
+    for conf in config.get(CONF_ON_START, []):
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        yield automation.build_automation(trigger, [], conf)
