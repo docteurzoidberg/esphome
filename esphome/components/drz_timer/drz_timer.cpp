@@ -13,7 +13,7 @@ float Timer::get_setup_priority() const { return setup_priority::IO; }
 void Timer::setup() {
   ESP_LOGD(TAG, "Setting up timer...");
   _is_running = false;
-  _time_left = 15.0f;
+  _time_left = _inital_time;
 }
 
 void Timer::loop() {
@@ -43,10 +43,9 @@ void Timer::loop() {
   this->_last_loop_time = now;
 }
 
-void Timer::Start(float length) {
-  _time_left = length;
+void Timer::Start() {
   _is_running = true;
-  ESP_LOGD(TAG, "Timer started with %f seconds", length);
+  ESP_LOGD(TAG, "Timer started with %f seconds", _time_left);
   if(this->_start_trigger != nullptr)
     this->_start_trigger->trigger();
   if(this->time_left != nullptr)
@@ -66,7 +65,7 @@ void Timer::Stop() {
 
 void Timer::Reset() {
   _is_running = false;
-  _time_left = 15.0f;
+  _time_left = _inital_time;
   ESP_LOGD(TAG, "Timer reset");
   if(this->_stop_trigger != nullptr)
     this->_stop_trigger->trigger();

@@ -15,6 +15,7 @@ Timer = drztimer_ns.class_("Timer", cg.Component)
 
 CONF_TIMER_ACTIVE = "timer_active"
 CONF_TIME_LEFT = "time_left"
+CONF_TIME = "time"
 
 CONF_ON_END = "on_end"
 CONF_ON_START = "on_start"
@@ -24,6 +25,7 @@ CONFIG_SCHEMA = cv.COMPONENT_SCHEMA.extend(
     {
         # id
         cv.GenerateID(): cv.declare_id(Timer),
+        cv.Required(CONF_TIME): cv.positive_time_period_seconds,
         # time_left sensor
         cv.Optional(CONF_TIME_LEFT): sensor.sensor_schema(
             unit_of_measurement=UNIT_SECOND, icon=ICON_TIMER, accuracy_decimals=1
@@ -41,6 +43,8 @@ CONFIG_SCHEMA = cv.COMPONENT_SCHEMA.extend(
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
+
+    cg.add(var.set_inital_time(config[CONF_TIME]))
 
     if CONF_TIME_LEFT in config:
         sens = await sensor.new_sensor(config[CONF_TIME_LEFT])

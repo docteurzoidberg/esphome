@@ -16,10 +16,11 @@ class Timer : public Component {
 
   float get_setup_priority() const override;
 
+  void set_inital_time(float time) { this->_inital_time = time; }
   void set_time_left(sensor::Sensor *sensor) { this->time_left = sensor; }
   void set_timer_active(binary_sensor::BinarySensor *sensor) { this->timer_active = sensor; }
 
-  void Start(float length);
+  void Start();
   void Stop();
   void Reset();
 
@@ -33,7 +34,8 @@ class Timer : public Component {
 
   bool _is_running = false;
   uint32_t _last_loop_time = 0;
-  float _time_left = 0;
+  float _time_left = 0.0f;
+  float _inital_time = 0.0f;
   Trigger<> *_end_trigger = new Trigger<>();
   Trigger<> *_start_trigger = new Trigger<>();
   Trigger<> *_stop_trigger = new Trigger<>();

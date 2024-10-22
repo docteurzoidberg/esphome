@@ -1,0 +1,154 @@
+substitutions:
+  name: esphome-drztimer-test
+  friendly_name: DrzTimer Component Test
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2024.11.0
+  name_add_mac_suffix: false
+
+esp32:
+  board: m5stack-core-esp32
+  framework:
+    type: arduino
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+
+# Allow Over-The-Air updates
+ota:
+- platform: esphome
+
+# Allow provisioning Wi-Fi via serial
+improv_serial:
+
+wifi:
+  # Set up a wifi access point
+  ap: {}
+
+spi:
+  clk_pin: 18
+  mosi_pin: 23
+  miso_pin: 19
+
+
+output:
+  # GPIO pin of the display backlight
+  - platform: ledc
+    pin: 32
+    id: gpio_32_backlight_pwm
+
+light:
+  - platform: monochromatic
+    output: gpio_32_backlight_pwm
+    name: "Display Backlight"
+    id: back_light
+    restore_mode: ALWAYS_ON
+
+
+drz_timer:
+#timer1
+  - id: timer1
+    time: 15min # initial value of the timer (time)
+    time_left:
+      id: timer1_left # time left sensor
+    timer_active:
+      id: timer1_active # timer active binary sensor
+    on_start:
+      then:
+        - lambda: ESP_LOGD("TEST", "TEST timer1 started");
+    on_stop:
+      then:
+        - lambda: ESP_LOGD("TEST", "TEST timer1 stopped");
+    on_end:
+      then:
+        - lambda: ESP_LOGD("TEST", "TEST timer1 ended");
+#timer2
+  - id: timer2
+    time: 1min # initial value of the timer (time)
+    time_left:
+      id: timer2_left # time left sensor
+    timer_active:
+      id: timer2_active # timer active binary sensor
+    on_start:
+      then:
+        - lambda: ESP_LOGD("TEST", "TEST timer2 started");
+    on_stop:
+      then:
+        - lambda: ESP_LOGD("TEST", "TEST timer2 stopped");
+    on_end:
+      then:
+        - lambda: ESP_LOGD("TEST", "TEST timer2 ended");
+
+
+binary_sensor:
+#timer1 buttons
+  - id: timer1_start
+    platform: gpio
+    pin:
+      number: 39
+      inverted: true
+    on_press:
+     then:
+      lambda: id(timer1).Start();
+  - id: timer1_stop
+    platform: gpio
+    pin:
+      number: 38
+      inverted: true
+    on_press:
+     then:
+      lambda: id(timer1).Stop();
+  - id: timer1_reset
+    platform: gpio
+    pin:
+      number: 37
+      inverted: true
+    on_press:
+     then:
+      lambda: id(timer1).Reset();
+
+
+font:
+  - file: "gfonts://Roboto@medium"
+    id: font_roboto_medium22
+    size: 22
+    glyphs: '!"%()+,-_.:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz/³µ'
+
+color:
+  - id: RED
+    red: 100%
+    green: 0%
+    blue: 0%
+  - id: BLUE
+    red: 0%
+    green: 0%
+    blue: 100%
+  - id: GREEN
+    red: 0%
+    green: 100%
+    blue: 0%
+  - id: WHITE
+    red: 100%
+    green: 100%
+    blue: 100%
+
+display:
+  - platform: ili9xxx
+    id: m5stack_display
+    model: M5Stack
+    cs_pin: 14
+    dc_pin: 27
+    reset_pin: 33
+    rotation: 0
+    update_interval: 1s
+    invert_colors: true
+    lambda: |-
+
+      if ( id(timer1_active).state ) {
+        it.printf(it.get_width() / 2, 190, id(font_roboto_medium22), BLUE, TextAlign::CENTER, "Il reste : %f sec", id(timer1_left).state);
+      }
