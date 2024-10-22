@@ -1,0 +1,66 @@
+external_components:
+  - source: github://docteurzoidberg/esphome@dev
+    components: [drz_timer]
+
+drz_timer:
+#timer1
+  - id: timer1
+    time: 15min # initial value of the timer (time)
+    time_left:
+      id: timer1_left # time left sensor
+    timer_active:
+      id: timer1_active # timer active binary sensor
+    on_start:
+      then:
+        - lambda: ESP_LOGD("TEST", "TEST timer1 started");
+    on_stop:
+      then:
+        - lambda: ESP_LOGD("TEST", "TEST timer1 stopped");
+    on_end:
+      then:
+        - lambda: ESP_LOGD("TEST", "TEST timer1 ended");
+#timer2
+  - id: timer2
+    time: 1min # initial value of the timer (time)
+    time_left:
+      id: timer2_left # time left sensor
+    timer_active:
+      id: timer2_active # timer active binary sensor
+    on_start:
+      then:
+        - lambda: ESP_LOGD("TEST", "TEST timer2 started");
+    on_stop:
+      then:
+        - lambda: ESP_LOGD("TEST", "TEST timer2 stopped");
+    on_end:
+      then:
+        - lambda: ESP_LOGD("TEST", "TEST timer2 ended");
+
+
+button:
+#timer1 buttons
+  - id: timer1_start
+    on_press:
+     then:
+      lambda: id(timer1).Start();
+  - id: timer1_stop
+    on_press:
+     then:
+      lambda: id(timer1).Stop();
+  - id: timer1_reset
+    on_press:
+     then:
+      lambda: id(timer1).Reset();
+#timer2 buttons
+  - id: timer2_start
+    on_press:
+     then:
+      lambda: id(timer2).Start();
+  - id: timer2_stop
+    on_press:
+     then:
+      lambda: id(timer2).Stop();
+  - id: timer2_reset
+    on_press:
+     then:
+      lambda: id(timer2).Reset();
