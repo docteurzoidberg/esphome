@@ -24,6 +24,9 @@ class Timer : public Component {
   void Stop();
   void Reset();
 
+  float GetTimeLeft() { return _time_left; }
+  bool IsRunning() { return _is_running; }
+
   Trigger<> *get_end_trigger() const { return this->_end_trigger; }
   Trigger<> *get_start_trigger() const { return this->_start_trigger; }
   Trigger<> *get_stop_trigger() const { return this->_stop_trigger; }

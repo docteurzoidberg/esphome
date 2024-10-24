@@ -16,7 +16,6 @@ Timer = drztimer_ns.class_("Timer", cg.Component)
 CONF_TIMER_ACTIVE = "timer_active"
 CONF_TIME_LEFT = "time_left"
 CONF_TIME = "time"
-
 CONF_ON_END = "on_end"
 CONF_ON_START = "on_start"
 CONF_ON_STOP = "on_stop"
@@ -25,6 +24,7 @@ CONFIG_SCHEMA = cv.COMPONENT_SCHEMA.extend(
     {
         # id
         cv.GenerateID(): cv.declare_id(Timer),
+        # time
         cv.Required(CONF_TIME): cv.positive_time_period_seconds,
         # time_left sensor
         cv.Optional(CONF_TIME_LEFT): sensor.sensor_schema(
