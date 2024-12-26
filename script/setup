@@ -17,6 +17,9 @@ pip3 install -r requirements.txt -r requirements_optional.txt -r requirements_te
 pip3 install setuptools wheel
 pip3 install -e ".[dev,test,displays]" --config-settings editable_mode=compat
 
+
+git config --global --add safe.directory /workspaces/esphome
+
 pre-commit install
 
 script/platformio_install_deps.py platformio.ini --libraries --tools --platforms

@@ -4,7 +4,7 @@ set -e
 # set -x
 
 apt update
-apt-get install avahi-utils -y
+apt-get install git avahi-utils -y
 
 mkdir -p config
 script/setup
