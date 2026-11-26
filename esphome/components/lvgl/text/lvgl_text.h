@@ -1,19 +1,14 @@
 #pragma once
 
-#include <utility>
-
 #include "esphome/components/text/text.h"
-#include "esphome/core/automation.h"
-#include "esphome/core/component.h"
-#include "esphome/core/preferences.h"
 
-namespace esphome {
-namespace lvgl {
+namespace esphome::lvgl {
 
-class LVGLText : public text::Text {
+class LVGLText final : public text::Text {
  public:
-  void set_control_lambda(std::function<void(const std::string)> control_lambda) {
-    this->control_lambda_ = std::move(control_lambda);
+  // A setter, as the widget exists only after LVGL init; control() before then is buffered
+  void set_control_lambda(void (*control_lambda)(const std::string &)) {
+    this->control_lambda_ = control_lambda;
     if (this->initial_state_.has_value()) {
       this->control_lambda_(this->initial_state_.value());
       this->initial_state_.reset();
@@ -28,9 +23,8 @@ class LVGLText : public text::Text {
       this->initial_state_ = value;
     }
   }
-  std::function<void(const std::string)> control_lambda_{};
+  void (*control_lambda_)(const std::string &){nullptr};
   optional<std::string> initial_state_{};
 };
 
-}  // namespace lvgl
-}  // namespace esphome
+}  // namespace esphome::lvgl

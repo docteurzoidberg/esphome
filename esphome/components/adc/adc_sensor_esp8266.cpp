@@ -11,10 +11,9 @@ ADC_MODE(ADC_VCC)
 #include <Arduino.h>
 #endif  // USE_ADC_SENSOR_VCC
 
-namespace esphome {
-namespace adc {
+namespace esphome::adc {
 
-static const char *const TAG = "adc.esp8266";
+ESPHOME_LOG_TAG(TAG, "adc");
 
 void ADCSensor::setup() {
 #ifndef USE_ADC_SENSOR_VCC
@@ -32,12 +31,12 @@ void ADCSensor::dump_config() {
   ESP_LOGCONFIG(TAG,
                 "  Samples: %i\n"
                 "  Sampling mode: %s",
-                this->sample_count_, LOG_STR_ARG(sampling_mode_to_str(this->sampling_mode_)));
+                this->sample_count_, LOG_STR_ARG(SamplingModeStrings::get_log_str(this->sampling_mode_)));
   LOG_UPDATE_INTERVAL(this);
 }
 
 float ADCSensor::sample() {
-  auto aggr = Aggregator(this->sampling_mode_);
+  auto aggr = Aggregator<uint32_t>(this->sampling_mode_);
 
   for (uint8_t sample = 0; sample < this->sample_count_; sample++) {
     uint32_t raw = 0;
@@ -55,7 +54,6 @@ float ADCSensor::sample() {
   return aggr.aggregate() / 1024.0f;
 }
 
-}  // namespace adc
-}  // namespace esphome
+}  // namespace esphome::adc
 
 #endif  // USE_ESP8266

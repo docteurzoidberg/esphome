@@ -1,10 +1,10 @@
 #pragma once
 
-#include "esphome/core/entity_base.h"
-#include "esphome/core/helpers.h"
+#include <cmath>
+#include <cstdint>
+#include <type_traits>
 
-namespace esphome {
-namespace number {
+namespace esphome::number {
 
 enum NumberMode : uint8_t {
   NUMBER_MODE_AUTO = 0,
@@ -12,7 +12,19 @@ enum NumberMode : uint8_t {
   NUMBER_MODE_SLIDER = 2,
 };
 
-class NumberTraits : public EntityBase_DeviceClass, public EntityBase_UnitOfMeasurement {
+/// Boundaries and step for a number; codegen shares one PROGMEM table between numbers with the same values.
+struct NumberRange {
+  float min_value;
+  float max_value;
+  float step;
+};
+// Read straight from flash on ESP8266, so every field must stay a word.
+static_assert(std::is_same_v<decltype(NumberRange::min_value), float>, "NumberRange fields must stay float");
+static_assert(std::is_same_v<decltype(NumberRange::max_value), float>, "NumberRange fields must stay float");
+static_assert(std::is_same_v<decltype(NumberRange::step), float>, "NumberRange fields must stay float");
+static_assert(sizeof(NumberRange) == 3 * sizeof(float), "NumberRange is read from flash with word loads");
+
+class NumberTraits {
  public:
   // Set/get the number value boundaries.
   void set_min_value(float min_value) { min_value_ = min_value; }
@@ -32,8 +44,7 @@ class NumberTraits : public EntityBase_DeviceClass, public EntityBase_UnitOfMeas
   float min_value_ = NAN;
   float max_value_ = NAN;
   float step_ = NAN;
-  NumberMode mode_{NUMBER_MODE_AUTO};
+  NumberMode mode_{NUMBER_MODE_AUTO};  // Keep in sync with DEFAULT_MODE in __init__.py
 };
 
-}  // namespace number
-}  // namespace esphome
+}  // namespace esphome::number

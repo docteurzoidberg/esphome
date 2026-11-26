@@ -3,8 +3,7 @@
 #include "bedjet_codec.h"
 #include "esphome/core/helpers.h"
 
-namespace esphome {
-namespace bedjet {
+namespace esphome::bedjet {
 
 // Forward declare BedJetHub
 class BedJetHub;
@@ -13,11 +12,12 @@ class BedJetClient : public Parented<BedJetHub> {
  public:
   virtual void on_status(const BedjetStatusPacket *data) = 0;
   virtual void on_bedjet_state(bool is_ready) = 0;
+  // Called from the hub's dump_config(); not dump_config() so Component children don't print twice
+  virtual void dump_child_config() {}
 
  protected:
   friend BedJetHub;
   virtual std::string describe() = 0;
 };
 
-}  // namespace bedjet
-}  // namespace esphome
+}  // namespace esphome::bedjet

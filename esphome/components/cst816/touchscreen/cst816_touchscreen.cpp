@@ -1,34 +1,47 @@
 #include "cst816_touchscreen.h"
 #include "esphome/core/helpers.h"
 
-namespace esphome {
-namespace cst816 {
+namespace esphome::cst816 {
 
 void CST816Touchscreen::continue_setup_() {
   if (this->interrupt_pin_ != nullptr) {
     this->interrupt_pin_->setup();
     this->attach_interrupt_(this->interrupt_pin_, gpio::INTERRUPT_FALLING_EDGE);
   }
-  if (this->read_byte(REG_CHIP_ID, &this->chip_id_)) {
-    switch (this->chip_id_) {
-      case CST820_CHIP_ID:
-      case CST826_CHIP_ID:
-      case CST716_CHIP_ID:
-      case CST816S_CHIP_ID:
-      case CST816D_CHIP_ID:
-      case CST816T_CHIP_ID:
-        break;
-      default:
-        this->mark_failed();
-        this->status_set_error(str_sprintf("Unknown chip ID 0x%02X", this->chip_id_).c_str());
-        return;
-    }
-    this->write_byte(REG_IRQ_CTL, IRQ_EN_MOTION);
-  } else if (!this->skip_probe_) {
-    this->status_set_error("Failed to read chip id");
+
+  if (!this->read_byte(REG_CHIP_ID, &this->chip_id_) && !this->skip_probe_) {
+    this->status_set_error(LOG_STR("Failed to read chip ID"));
     this->mark_failed();
     return;
   }
+
+  // CST826/CST836 return 0 for chip ID, need to read from factory ID register
+  if (this->chip_id_ == 0) {
+    if (!this->read_byte(REG_FACTORY_ID, &this->chip_id_) && !this->skip_probe_) {
+      this->status_set_error(LOG_STR("Failed to read chip ID"));
+      this->mark_failed();
+      return;
+    }
+  }
+
+  switch (this->chip_id_) {
+    case CST716_CHIP_ID:
+    case CST816S_CHIP_ID:
+    case CST816D_CHIP_ID:
+    case CST816T_CHIP_ID:
+    case CST820_CHIP_ID:
+    case CST826_CHIP_ID:
+    case CST836_CHIP_ID:
+      break;
+    default:
+      if (!this->skip_probe_) {
+        ESP_LOGE(TAG, "Unknown chip ID: 0x%02X", this->chip_id_);
+        this->status_set_error(LOG_STR("Unknown chip ID"));
+        this->mark_failed();
+        return;
+      }
+  }
+  this->write_byte(REG_IRQ_CTL, IRQ_EN_MOTION);
   if (this->x_raw_max_ == this->x_raw_min_) {
     this->x_raw_max_ = this->display_->get_native_width();
   }
@@ -39,12 +52,7 @@ void CST816Touchscreen::continue_setup_() {
 
 void CST816Touchscreen::setup() {
   if (this->reset_pin_ != nullptr) {
-    this->reset_pin_->setup();
-    this->reset_pin_->digital_write(true);
-    delay(5);
-    this->reset_pin_->digital_write(false);
-    delay(5);
-    this->reset_pin_->digital_write(true);
+    pulse_reset(this->reset_pin_, {.high_before_ms = 5, .low_ms = 5});
     this->set_timeout(30, [this] { this->continue_setup_(); });
   } else {
     this->continue_setup_();
@@ -53,37 +61,44 @@ void CST816Touchscreen::setup() {
 
 void CST816Touchscreen::update_touches() {
   uint8_t data[13];
-  if (!this->read_bytes(REG_STATUS, data, sizeof data)) {
-    this->status_set_warning();
+  if (!this->status_comm_result(this->read_bytes(REG_STATUS, data, sizeof data)))
     return;
-  }
-  uint8_t num_of_touches = data[REG_TOUCH_NUM] & 3;
+
+  // The low nibble is the touch count. CST816/CST820 are single-touch;
+  // CST826/CST836 can report two points, but this driver only reads the first
+  // point. Some CST8xx controllers report an all-0xFF frame when idle or after
+  // disabling auto-sleep: the count lands above two and the coordinates are
+  // the 0xFFF sentinel, so both guards below reject it.
+  uint8_t num_of_touches = low_nibble(data[REG_TOUCH_NUM]);
   if (num_of_touches == 0) {
     return;
   }
+  if (num_of_touches > 2) {
+    return;
+  }
 
-  uint16_t x = encode_uint16(data[REG_XPOS_HIGH] & 0xF, data[REG_XPOS_LOW]);
-  uint16_t y = encode_uint16(data[REG_YPOS_HIGH] & 0xF, data[REG_YPOS_LOW]);
+  uint16_t x = encode_uint16(low_nibble(data[REG_XPOS_HIGH]), data[REG_XPOS_LOW]);
+  uint16_t y = encode_uint16(low_nibble(data[REG_YPOS_HIGH]), data[REG_YPOS_LOW]);
+  if (x == 0x0FFF || y == 0x0FFF) {
+    return;
+  }
   ESP_LOGV(TAG, "Read touch %d/%d", x, y);
   this->add_raw_touch_position_(0, x, y);
 }
 
 void CST816Touchscreen::dump_config() {
-  ESP_LOGCONFIG(TAG, "CST816 Touchscreen:");
-  LOG_I2C_DEVICE(this);
-  LOG_PIN("  Interrupt Pin: ", this->interrupt_pin_);
-  LOG_PIN("  Reset Pin: ", this->reset_pin_);
   ESP_LOGCONFIG(TAG,
+                "CST816 Touchscreen:\n"
                 "  X Raw Min: %d, X Raw Max: %d\n"
                 "  Y Raw Min: %d, Y Raw Max: %d",
                 this->x_raw_min_, this->x_raw_max_, this->y_raw_min_, this->y_raw_max_);
+  LOG_I2C_DEVICE(this);
+  LOG_PIN("  Interrupt Pin: ", this->interrupt_pin_);
+  LOG_PIN("  Reset Pin: ", this->reset_pin_);
   const char *name;
   switch (this->chip_id_) {
-    case CST820_CHIP_ID:
-      name = "CST820";
-      break;
-    case CST826_CHIP_ID:
-      name = "CST826";
+    case CST716_CHIP_ID:
+      name = "CST716";
       break;
     case CST816S_CHIP_ID:
       name = "CST816S";
@@ -91,11 +106,17 @@ void CST816Touchscreen::dump_config() {
     case CST816D_CHIP_ID:
       name = "CST816D";
       break;
-    case CST716_CHIP_ID:
-      name = "CST716";
-      break;
     case CST816T_CHIP_ID:
       name = "CST816T";
+      break;
+    case CST820_CHIP_ID:
+      name = "CST820";
+      break;
+    case CST826_CHIP_ID:
+      name = "CST826";
+      break;
+    case CST836_CHIP_ID:
+      name = "CST836";
       break;
     default:
       name = "Unknown";
@@ -104,5 +125,4 @@ void CST816Touchscreen::dump_config() {
   ESP_LOGCONFIG(TAG, "  Chip type: %s", name);
 }
 
-}  // namespace cst816
-}  // namespace esphome
+}  // namespace esphome::cst816

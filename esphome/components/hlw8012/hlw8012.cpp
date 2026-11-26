@@ -1,18 +1,16 @@
 #include "hlw8012.h"
 #include "esphome/core/log.h"
 
-namespace esphome {
-namespace hlw8012 {
+namespace esphome::hlw8012 {
 
-static const char *const TAG = "hlw8012";
+ESPHOME_LOG_TAG(TAG, "hlw8012");
 
 // valid for HLW8012 and CSE7759
 static const uint32_t HLW8012_CLOCK_FREQUENCY = 3579000;
 
 void HLW8012Component::setup() {
   float reference_voltage = 0;
-  this->sel_pin_->setup();
-  this->sel_pin_->digital_write(this->current_mode_);
+  setup_output_pin(this->sel_pin_, this->current_mode_);
   this->cf_store_.pulse_counter_setup(this->cf_pin_);
   this->cf1_store_.pulse_counter_setup(this->cf1_pin_);
 
@@ -33,22 +31,21 @@ void HLW8012Component::setup() {
   }
 }
 void HLW8012Component::dump_config() {
-  ESP_LOGCONFIG(TAG, "HLW8012:");
-  LOG_PIN("  SEL Pin: ", this->sel_pin_)
-  LOG_PIN("  CF Pin: ", this->cf_pin_)
-  LOG_PIN("  CF1 Pin: ", this->cf1_pin_)
   ESP_LOGCONFIG(TAG,
+                "HLW8012:\n"
                 "  Change measurement mode every %" PRIu32 "\n"
                 "  Current resistor: %.1f mΩ\n"
                 "  Voltage Divider: %.1f",
                 this->change_mode_every_, this->current_resistor_ * 1000.0f, this->voltage_divider_);
-  LOG_UPDATE_INTERVAL(this)
-  LOG_SENSOR("  ", "Voltage", this->voltage_sensor_)
-  LOG_SENSOR("  ", "Current", this->current_sensor_)
-  LOG_SENSOR("  ", "Power", this->power_sensor_)
-  LOG_SENSOR("  ", "Energy", this->energy_sensor_)
+  LOG_PIN("  SEL Pin: ", this->sel_pin_);
+  LOG_PIN("  CF Pin: ", this->cf_pin_);
+  LOG_PIN("  CF1 Pin: ", this->cf1_pin_);
+  LOG_UPDATE_INTERVAL(this);
+  LOG_SENSOR("  ", "Voltage", this->voltage_sensor_);
+  LOG_SENSOR("  ", "Current", this->current_sensor_);
+  LOG_SENSOR("  ", "Power", this->power_sensor_);
+  LOG_SENSOR("  ", "Energy", this->energy_sensor_);
 }
-float HLW8012Component::get_setup_priority() const { return setup_priority::DATA; }
 void HLW8012Component::update() {
   // HLW8012 has 50% duty cycle
   pulse_counter::pulse_counter_t raw_cf = this->cf_store_.read_raw_value();
@@ -74,22 +71,16 @@ void HLW8012Component::update() {
     // Only read cf1 after one cycle. Apparently it's quite unstable after being changed.
     if (this->current_mode_) {
       float current = cf1_hz * this->current_multiplier_;
-      ESP_LOGD(TAG, "Got power=%.1fW, current=%.1fA", power, current);
-      if (this->current_sensor_ != nullptr) {
-        this->current_sensor_->publish_state(current);
-      }
+      ESP_LOGV(TAG, "Got power=%.1fW, current=%.1fA", power, current);
+      PUBLISH_STATE(this->current_sensor_, current);
     } else {
       float voltage = cf1_hz * this->voltage_multiplier_;
-      ESP_LOGD(TAG, "Got power=%.1fW, voltage=%.1fV", power, voltage);
-      if (this->voltage_sensor_ != nullptr) {
-        this->voltage_sensor_->publish_state(voltage);
-      }
+      ESP_LOGV(TAG, "Got power=%.1fW, voltage=%.1fV", power, voltage);
+      PUBLISH_STATE(this->voltage_sensor_, voltage);
     }
   }
 
-  if (this->power_sensor_ != nullptr) {
-    this->power_sensor_->publish_state(power);
-  }
+  PUBLISH_STATE(this->power_sensor_, power);
 
   if (this->energy_sensor_ != nullptr) {
     cf_total_pulses_ += raw_cf;
@@ -99,11 +90,11 @@ void HLW8012Component::update() {
 
   if (this->change_mode_every_ != 0 && this->change_mode_at_++ == this->change_mode_every_) {
     this->current_mode_ = !this->current_mode_;
-    ESP_LOGV(TAG, "Changing mode to %s mode", this->current_mode_ ? "CURRENT" : "VOLTAGE");
+    ESP_LOGV(TAG, "Changing mode to %s mode",
+             this->current_mode_ ? LOG_STR_LITERAL("CURRENT") : LOG_STR_LITERAL("VOLTAGE"));
     this->change_mode_at_ = 0;
     this->sel_pin_->digital_write(this->current_mode_);
   }
 }
 
-}  // namespace hlw8012
-}  // namespace esphome
+}  // namespace esphome::hlw8012

@@ -1,38 +1,66 @@
-import os
-from typing import Final, TypedDict
+from collections.abc import Callable
+from pathlib import Path
+import textwrap
+from typing import Literal, NamedTuple, NotRequired, TypedDict
 
 import esphome.codegen as cg
-from esphome.const import CONF_BOARD
-from esphome.core import CORE
+import esphome.config_validation as cv
+from esphome.const import CONF_BOARD, KEY_CORE, KEY_TARGET_FRAMEWORK
+from esphome.core import CORE, CoroPriority, coroutine_with_priority
 from esphome.helpers import copy_file_if_changed, write_file_if_changed
+from esphome.types import ConfigType
+from esphome.writer import clean_cmake_cache
 
 from .const import (
-    BOOTLOADER_MCUBOOT,
     KEY_BOOTLOADER,
     KEY_EXTRA_BUILD_FILES,
+    KEY_FAMILY,
+    KEY_FRAMEWORK_TYPE,
+    KEY_KCONFIG,
     KEY_OVERLAY,
+    KEY_OVERLAY_BUILDER,
     KEY_PM_STATIC,
     KEY_PRJ_CONF,
+    KEY_SYSBUILD,
+    KEY_VARIANT,
     KEY_ZEPHYR,
     zephyr_ns,
 )
 
 CODEOWNERS = ["@tomaszduda23"]
-AUTO_LOAD = ["preferences"]
-KEY_BOARD: Final = "board"
+DOMAIN = "zephyr"
 
-PrjConfValueType = bool | str | int
+
+class HexValue:
+    """Wrap an integer so it is written as 0x... in prj.conf (required for hex Kconfig types)."""
+
+    def __init__(self, value: int) -> None:
+        self.value = value
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, HexValue):
+            return self.value == other.value
+        return NotImplemented
+
+    def __repr__(self) -> str:
+        return f"HexValue(0x{self.value:X})"
+
+    def __str__(self) -> str:
+        return f"0x{self.value:X}"
+
+
+PrjConfValueType = bool | str | int | HexValue
 
 
 class Section:
-    def __init__(self, name, address, size, region):
+    def __init__(self, name: str, address: int, size: int, region: str) -> None:
         self.name = name
         self.address = address
         self.size = size
         self.region = region
         self.end_address = self.address + self.size
 
-    def __str__(self):
+    def __str__(self) -> str:
         return (
             f"{self.name}:\n"
             f"  address: 0x{self.address:X}\n"
@@ -42,38 +70,97 @@ class Section:
         )
 
 
+class CdcAcmUser(NamedTuple):
+    name: str
+    # Only writes with uart_poll_out() and never sets the IRQ callback (the logger)
+    write_only: bool
+    # Can share the port with write-only users (protocols that skip unframed text)
+    allow_write_only: bool
+
+
 class ZephyrData(TypedDict):
     board: str
     bootloader: str
-    prj_conf: dict[str, tuple[PrjConfValueType, bool]]
-    overlay: str
-    extra_build_files: dict[str, str]
+    prj_conf: dict[str, dict[str, tuple[PrjConfValueType, bool]]]
+    overlay: dict[str, str]
+    extra_build_files: dict[str, Path]
     pm_static: list[Section]
+    kconfig: str
+    sysbuild: bool
+    overlay_builder: list[Callable[[], str]]
+    # CDC ACM port number -> components that use it
+    cdc_acm_users: dict[int, list[CdcAcmUser]]
+    # Add port 0 even when no component claims a port (see zephyr_require_cdc_acm())
+    cdc_acm_required: bool
+    # Set by the chips in a platform's zephyr_variants; nrf52 sets none of these
+    variant: NotRequired[str]
+    family: NotRequired[str | None]
+    framework_type: NotRequired[str]
 
 
-def zephyr_set_core_data(config):
+def zephyr_set_core_data(config: ConfigType) -> None:
     CORE.data[KEY_ZEPHYR] = ZephyrData(
         board=config[CONF_BOARD],
         bootloader=config[KEY_BOOTLOADER],
         prj_conf={},
-        overlay="",
+        overlay={
+            "": "",
+        },  # set empty to make sure that overlay is cleared after config change
+        overlay_builder=[],
+        cdc_acm_users={},
+        cdc_acm_required=False,
         extra_build_files={},
         pm_static=[],
+        kconfig="",
+        # When OTA is disabled, the image is built without a bootloader even if the
+        # config says `bootloader: mcuboot`, so the image can be smaller. This was
+        # the default behaviour in SDK 2.6.1.
+        sysbuild=False,
     )
-    return config
 
 
 def zephyr_data() -> ZephyrData:
     return CORE.data[KEY_ZEPHYR]
 
 
+def _get_data() -> ZephyrData | dict[str, object]:
+    """Raise if the platform schema, which sets the target framework, has not run yet."""
+    if (data := CORE.data.get(KEY_ZEPHYR)) is not None:
+        return data
+    if (framework := CORE.data.get(KEY_CORE, {}).get(KEY_TARGET_FRAMEWORK)) is None:
+        raise RuntimeError("Zephyr variant read before the platform schema set it")
+    if framework == KEY_ZEPHYR:
+        raise RuntimeError("Zephyr build without Zephyr data")
+    return {}
+
+
+def zephyr_variant() -> str | None:
+    """The active chip from a platform's zephyr_variants; None for nrf52 and others."""
+    return _get_data().get(KEY_VARIANT)
+
+
+def zephyr_variant_family() -> str | None:
+    """The active variant's family name, e.g. "stm32"; None without one."""
+    return _get_data().get(KEY_FAMILY)
+
+
+def zephyr_framework_type() -> str | None:
+    """The active `framework: type:`, e.g. "zephyr"; None as for zephyr_variant()."""
+    return _get_data().get(KEY_FRAMEWORK_TYPE)
+
+
 def zephyr_add_prj_conf(
-    name: str, value: PrjConfValueType, required: bool = True
+    name: str,
+    value: PrjConfValueType,
+    required: bool = True,
+    image: str = "",
 ) -> None:
     """Set an zephyr prj conf value."""
     if not name.startswith("CONFIG_"):
         name = "CONFIG_" + name
-    prj_conf = zephyr_data()[KEY_PRJ_CONF]
+    if image not in zephyr_data()[KEY_PRJ_CONF]:
+        zephyr_data()[KEY_PRJ_CONF][image] = {}
+    prj_conf = zephyr_data()[KEY_PRJ_CONF][image]
     if name not in prj_conf:
         prj_conf[name] = (value, required)
         return
@@ -86,11 +173,34 @@ def zephyr_add_prj_conf(
         prj_conf[name] = (value, required)
 
 
-def zephyr_add_overlay(content):
-    zephyr_data()[KEY_OVERLAY] += content
+def zephyr_add_prj_conf_min(name: str, value: int, image: str = "") -> None:
+    """Require a numeric zephyr prj conf value of at least ``value``.
+
+    For sizes several components ask for, such as the main stack: the largest
+    request wins instead of two different requests failing the build.
+    """
+    if not name.startswith("CONFIG_"):
+        name = "CONFIG_" + name
+    prj_conf = zephyr_data()[KEY_PRJ_CONF].setdefault(image, {})
+    if name in prj_conf:
+        value = max(value, prj_conf[name][0])
+    prj_conf[name] = (value, True)
 
 
-def add_extra_build_file(filename: str, path: str) -> bool:
+def zephyr_add_overlay(content: str, image: str = "") -> None:
+    data = zephyr_data()
+    if image not in data[KEY_OVERLAY]:
+        data[KEY_OVERLAY][image] = ""
+    data[KEY_OVERLAY][image] += textwrap.dedent(content)
+
+
+def zephyr_add_overlay_builder(func: Callable[[], str]) -> None:
+    data = zephyr_data()
+    if func not in data[KEY_OVERLAY_BUILDER]:
+        data[KEY_OVERLAY_BUILDER].append(func)
+
+
+def add_extra_build_file(filename: str, path: Path) -> bool:
     """Add an extra build file to the project."""
     extra_build_files = zephyr_data()[KEY_EXTRA_BUILD_FILES]
     if filename not in extra_build_files:
@@ -99,55 +209,60 @@ def add_extra_build_file(filename: str, path: str) -> bool:
     return False
 
 
-def add_extra_script(stage: str, filename: str, path: str):
+def add_extra_script(stage: str, filename: str, path: Path) -> None:
     """Add an extra script to the project."""
     key = f"{stage}:{filename}"
     if add_extra_build_file(filename, path):
         cg.add_platformio_option("extra_scripts", [key])
 
 
-def zephyr_to_code(config):
-    cg.add(zephyr_ns.setup_preferences())
+def zephyr_to_code(config: ConfigType) -> None:
     cg.add_build_flag("-DUSE_ZEPHYR")
+    # Zephyr's base warnings include -Wdouble-promotion, which every float passed to a log call
+    # trips; the promotion is how variadic arguments work, so the warning only adds noise
+    cg.add_build_flag("-Wno-double-promotion")
+    cg.add_define("USE_NATIVE_64BIT_TIME")
+    # The settings subsystem finds stored preferences by key, so key migration is possible
+    cg.add_define("USE_PREFERENCE_KEY_LOOKUP")
     cg.set_cpp_standard("gnu++20")
-    # build is done by west so bypass board checking in platformio
-    cg.add_platformio_option("boards_dir", CORE.relative_build_path("boards"))
-
     # c++ support
-    zephyr_add_prj_conf("NEWLIB_LIBC", True)
-    zephyr_add_prj_conf("CONFIG_FPU", True)
-    zephyr_add_prj_conf("NEWLIB_LIBC_FLOAT_PRINTF", True)
-    zephyr_add_prj_conf("CPLUSPLUS", True)
-    zephyr_add_prj_conf("CONFIG_STD_CPP20", True)
-    zephyr_add_prj_conf("LIB_CPLUSPLUS", True)
-    # preferences
-    zephyr_add_prj_conf("SETTINGS", True)
-    zephyr_add_prj_conf("NVS", True)
-    zephyr_add_prj_conf("FLASH_MAP", True)
-    zephyr_add_prj_conf("CONFIG_FLASH", True)
-    # watchdog
-    zephyr_add_prj_conf("WATCHDOG", True)
-    zephyr_add_prj_conf("WDT_DISABLE_AT_BOOT", False)
-    # disable console
-    zephyr_add_prj_conf("UART_CONSOLE", False)
-    zephyr_add_prj_conf("CONSOLE", False, False)
-    # use NFC pins as GPIO
-    zephyr_add_prj_conf("NFCT_PINS_AS_GPIOS", True)
+    zephyr_add_prj_conf("STD_CPP20", True)
 
     # <err> os: ***** USAGE FAULT *****
     # <err> os:   Illegal load of EXC_RETURN into PC
-    zephyr_add_prj_conf("MAIN_STACK_SIZE", 2048)
+    zephyr_add_prj_conf("MAIN_STACK_SIZE", 2048, required=False)
 
-    add_extra_script(
-        "pre",
-        "pre_build.py",
-        os.path.join(os.path.dirname(__file__), "pre_build.py.script"),
-    )
+    CORE.add_job(_cdc_acm_to_code)
+
+
+@coroutine_with_priority(CoroPriority.FINAL)
+async def _cdc_acm_to_code() -> None:
+    # Runs last so these required options override the optional defaults that
+    # platforms (nrf52) set during their own to_code
+    _cdc_acm_add_ports()
+
+
+PreferenceStorage = Literal["NVS", "ZMS"]
+
+
+def zephyr_setup_preferences(storage: PreferenceStorage = "NVS") -> None:
+    """Store preferences through the settings subsystem.
+
+    `storage` picks the Zephyr storage backend: NVS for flash, ZMS for RRAM and MRAM.
+    """
+    cg.add(zephyr_ns.setup_preferences())
+    zephyr_add_prj_conf("SETTINGS", True)
+    zephyr_add_prj_conf(storage, True)
+    zephyr_add_prj_conf(f"SETTINGS_{storage}", True)
+    zephyr_add_prj_conf("FLASH_MAP", True)
+    zephyr_add_prj_conf("FLASH", True)
 
 
 def _format_prj_conf_val(value: PrjConfValueType) -> str:
     if isinstance(value, bool):
         return "y" if value else "n"
+    if isinstance(value, HexValue):
+        return hex(value.value)
     if isinstance(value, int):
         return str(value)
     if isinstance(value, str):
@@ -155,7 +270,84 @@ def _format_prj_conf_val(value: PrjConfValueType) -> str:
     raise ValueError
 
 
-def zephyr_add_cdc_acm(config, id):
+def zephyr_claim_cdc_acm(
+    id: int,
+    user: str,
+    *,
+    write_only: bool = False,
+    allow_write_only: bool = False,
+) -> None:
+    """Reserve CDC ACM port `id` for `user`. Call from FINAL_VALIDATE_SCHEMA.
+
+    zephyr_to_code() later adds the device tree node and Kconfig options for
+    every claimed port, so components do not set up the port themselves.
+
+    Components on the same port share one device, and the device has only one
+    IRQ callback slot: the component set up last takes all received data from
+    the other. So a port normally has one user. The exception is a `write_only`
+    user (the logger), which never sets the IRQ callback; it may share the port
+    with a user that sets `allow_write_only` because its protocol skips text
+    that is not part of its own frames (mcumgr).
+    """
+    new = CdcAcmUser(user, write_only, allow_write_only)
+    users = zephyr_data()["cdc_acm_users"].setdefault(id, [])
+    for other in users:
+        if other.name == user:
+            return
+        if (new.write_only and other.allow_write_only) or (
+            other.write_only and new.allow_write_only
+        ):
+            continue
+        raise cv.Invalid(
+            f"USB CDC ACM port {id} (cdc_acm_uart{id}) is used by both "
+            f"'{other.name}' and '{user}'. Each port can only be used by one component."
+        )
+    users.append(new)
+
+
+def zephyr_use_usb_device_next() -> bool:
+    """Return True when the build uses the new Zephyr USB device stack.
+
+    The new stack (device_next) is used from nRF Connect SDK 3.4.1, where the
+    legacy stack is deprecated. Older SDKs keep the legacy stack.
+    """
+    return CORE.is_nrf52 and CORE.framework_version >= cv.Version(3, 4, 1)
+
+
+def _disable_board_cdc_acm_overlay() -> str:
+    """Disable the CDC ACM port that boards with a USB serial backend add.
+
+    On boards without that port the overlay adds an empty disabled node, which
+    does nothing, so it is safe on every board.
+    """
+    return """
+        &zephyr_udc0 {
+            board_cdc_acm_uart: board_cdc_acm_uart {
+                status = "disabled";
+            };
+        };
+    """
+
+
+def zephyr_enable_usb_cdc_acm() -> None:
+    """Enable the USB device stack with the CDC ACM class."""
+    zephyr_add_prj_conf("SERIAL", True)
+    # DTR (port opened) and the bit rate are read with uart_line_ctrl_get()
+    zephyr_add_prj_conf("UART_LINE_CTRL", True)
+    if zephyr_use_usb_device_next():
+        zephyr_add_prj_conf("USB_DEVICE_STACK", False)
+        zephyr_add_prj_conf("USB_DEVICE_STACK_NEXT", True)
+        zephyr_add_prj_conf("USBD_CDC_ACM_CLASS", True)
+        # The serial number string descriptor is read from the chip ID
+        zephyr_add_prj_conf("HWINFO", True)
+        # prevent logging when buffer is full
+        zephyr_add_prj_conf("USBD_CDC_ACM_LOG_LEVEL_WRN", True)
+        # Boards with a USB serial backend (xiao_ble, feather_nrf52840, ...) start their own USB
+        # device at boot with their own CDC ACM port. usb_device.cpp sets up the device instead,
+        # and only the ports ESPHome adds may be on the bus.
+        zephyr_add_prj_conf("CDC_ACM_SERIAL_INITIALIZE_AT_BOOT", False)
+        zephyr_add_overlay_builder(_disable_board_cdc_acm_overlay)
+        return
     zephyr_add_prj_conf("USB_DEVICE_STACK", True)
     zephyr_add_prj_conf("USB_CDC_ACM", True)
     # prevent device to go to susspend, without this communication stop working in python
@@ -163,69 +355,145 @@ def zephyr_add_cdc_acm(config, id):
     zephyr_add_prj_conf("USB_DEVICE_REMOTE_WAKEUP", False)
     # prevent logging when buffer is full
     zephyr_add_prj_conf("USB_CDC_ACM_LOG_LEVEL_WRN", True)
+
+
+def zephyr_enable_cdc_acm_rate_callback() -> None:
+    """Make the bit rate a USB host sets on a CDC ACM port reach zephyr::CdcAcm."""
+    cg.add_define("USE_ZEPHYR_CDC_ACM_RATE_CALLBACK")
+    # The new stack reports the rate with a USB device message, so it needs no option
+    if not zephyr_use_usb_device_next():
+        zephyr_add_prj_conf("CDC_ACM_DTE_RATE_CALLBACK_SUPPORT", True)
+
+
+def zephyr_require_cdc_acm() -> None:
+    """Make sure the USB device has a CDC ACM port, even when no component claims one.
+
+    For users that only watch the bit rate the host sets (DFU), which works on any
+    port. On the legacy stack, boards with a USB serial backend keep their own port.
+    """
+    zephyr_enable_usb_cdc_acm()
+    if zephyr_use_usb_device_next():
+        zephyr_data()["cdc_acm_required"] = True
+
+
+def zephyr_enable_poweroff() -> None:
+    """Enable sys_poweroff(); Zigbee builds leave it out and stay awake instead."""
+    if "zigbee" not in CORE.loaded_integrations:
+        zephyr_add_prj_conf("POWEROFF", True)
+
+
+def _cdc_acm_add_ports() -> None:
+    """Set up every CDC ACM port claimed with zephyr_claim_cdc_acm()."""
+    data = zephyr_data()
+    ids = sorted(data["cdc_acm_users"])
+    if not ids and data["cdc_acm_required"]:
+        ids = [0]
+    if not ids:
+        return
+    zephyr_enable_usb_cdc_acm()
+    nodes = "".join(
+        f"""
+                cdc_acm_uart{id}: cdc_acm_uart{id} {{
+                    compatible = "zephyr,cdc-acm-uart";
+                }};"""
+        for id in ids
+    )
     zephyr_add_overlay(
         f"""
-&zephyr_udc0 {{
-    cdc_acm_uart{id}: cdc_acm_uart{id} {{
-        compatible = "zephyr,cdc-acm-uart";
-    }};
-}};
-"""
+            &zephyr_udc0 {{{nodes}
+            }};
+        """
     )
 
 
-def zephyr_add_pm_static(section: Section):
-    CORE.data[KEY_ZEPHYR][KEY_PM_STATIC].extend(section)
+def zephyr_add_kconfig(kconfig: str) -> None:
+    zephyr_data()[KEY_KCONFIG] += textwrap.dedent(kconfig) + "\n"
 
 
-def copy_files():
-    want_opts = zephyr_data()[KEY_PRJ_CONF]
+def zephyr_add_pm_static(sections: list[Section]) -> None:
+    zephyr_data()[KEY_PM_STATIC].extend(sections)
 
-    prj_conf = (
-        "\n".join(
-            f"{name}={_format_prj_conf_val(value[0])}"
-            for name, value in sorted(want_opts.items())
+
+def _write_file_if_changed_or_remove_when_empty(path: Path, content: str) -> bool:
+    """Write content to path, or remove a stale file when content is empty.
+
+    Returns True if the file changed on disk.
+    """
+    if content:
+        return write_file_if_changed(path, content)
+    if path.is_file():
+        path.unlink()
+        return True
+    return False
+
+
+def copy_files() -> None:
+    for builder_func in zephyr_data()[KEY_OVERLAY_BUILDER]:
+        overlay_contents = builder_func()
+        zephyr_add_overlay(overlay_contents)
+
+    changed = False
+
+    for image, want_opts in zephyr_data()[KEY_PRJ_CONF].items():
+        prj_conf = (
+            "\n".join(
+                f"{name}={_format_prj_conf_val(value[0])}"
+                for name, value in sorted(want_opts.items())
+            )
+            + "\n"
         )
-        + "\n"
-    )
 
-    write_file_if_changed(CORE.relative_build_path("zephyr/prj.conf"), prj_conf)
+        if image:
+            path = CORE.relative_build_path(f"zephyr/sysbuild/{image}.conf")
+        else:
+            path = CORE.relative_build_path("zephyr/prj.conf")
 
-    write_file_if_changed(
-        CORE.relative_build_path("zephyr/app.overlay"),
-        zephyr_data()[KEY_OVERLAY],
-    )
+        changed |= write_file_if_changed(path, prj_conf)
 
-    if zephyr_data()[KEY_BOOTLOADER] == BOOTLOADER_MCUBOOT or zephyr_data()[
-        KEY_BOARD
-    ] in ["xiao_ble"]:
-        fake_board_manifest = """
-{
-"frameworks": [
-    "zephyr"
-],
-"name": "esphome nrf52",
-"upload": {
-    "maximum_ram_size": 248832,
-    "maximum_size": 815104
-},
-"url": "https://esphome.io/",
-"vendor": "esphome"
-}
-"""
-        write_file_if_changed(
-            CORE.relative_build_path(f"boards/{zephyr_data()[KEY_BOARD]}.json"),
-            fake_board_manifest,
-        )
+    for image, content in zephyr_data()[KEY_OVERLAY].items():
+        if image:
+            path = CORE.relative_build_path(f"zephyr/sysbuild/{image}.overlay")
+        else:
+            path = CORE.relative_build_path("zephyr/app.overlay")
+        changed |= write_file_if_changed(path, content)
 
     for filename, path in zephyr_data()[KEY_EXTRA_BUILD_FILES].items():
-        copy_file_if_changed(
+        changed |= copy_file_if_changed(
             path,
             CORE.relative_build_path(filename),
         )
 
     pm_static = "\n".join(str(item) for item in zephyr_data()[KEY_PM_STATIC])
-    if pm_static:
-        write_file_if_changed(
-            CORE.relative_build_path("zephyr/pm_static.yml"), pm_static
+    changed |= _write_file_if_changed_or_remove_when_empty(
+        CORE.relative_build_path("zephyr/pm_static.yml"), pm_static
+    )
+
+    kconfig = zephyr_data()[KEY_KCONFIG]
+    if kconfig:
+        kconfig = (
+            textwrap.dedent(
+                """
+                menu "Zephyr"
+                source "Kconfig.zephyr"
+                endmenu
+                """
+            )
+            + "\n"
+            + kconfig
         )
+    changed |= _write_file_if_changed_or_remove_when_empty(
+        CORE.relative_build_path("zephyr/Kconfig"), kconfig
+    )
+
+    sysbuild_conf = ""
+    if zephyr_data()[KEY_SYSBUILD]:
+        sysbuild_conf = "SB_CONFIG_BOOTLOADER_MCUBOOT=y\n"
+    changed |= _write_file_if_changed_or_remove_when_empty(
+        CORE.relative_build_path("zephyr/sysbuild.conf"), sysbuild_conf
+    )
+
+    if changed:
+        # A configure-time input changed; drop the CMake cache so the build
+        # can't reuse stale configure results (the native sdk-nrf toolchain
+        # rebuilds pristine when the cache is missing).
+        clean_cmake_cache()

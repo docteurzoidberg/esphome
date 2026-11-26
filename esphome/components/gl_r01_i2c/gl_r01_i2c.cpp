@@ -2,10 +2,9 @@
 #include "esphome/core/hal.h"
 #include "gl_r01_i2c.h"
 
-namespace esphome {
-namespace gl_r01_i2c {
+namespace esphome::gl_r01_i2c {
 
-static const char *const TAG = "gl_r01_i2c";
+ESPHOME_LOG_TAG(TAG, "gl_r01_i2c");
 
 // Register definitions from datasheet
 static const uint8_t REG_VERSION = 0x00;
@@ -18,17 +17,17 @@ static const uint8_t READ_DELAY = 40;  // minimum milliseconds from datasheet to
 
 void GLR01I2CComponent::setup() {
   // Verify sensor presence
-  if (!this->read_byte_16(REG_VERSION, &this->version_)) {
-    ESP_LOGE(TAG, "Failed to communicate with GL-R01 I2C sensor!");
-    this->mark_failed();
+  if (!this->setup_check(this->read_byte_16(REG_VERSION, &this->version_),
+                         LOG_STR("Failed to communicate with GL-R01 I2C sensor!")))
     return;
-  }
   ESP_LOGD(TAG, "Found GL-R01 I2C with version 0x%04X", this->version_);
 }
 
 void GLR01I2CComponent::dump_config() {
-  ESP_LOGCONFIG(TAG, "GL-R01 I2C:");
-  ESP_LOGCONFIG(TAG, " Firmware Version: 0x%04X", this->version_);
+  ESP_LOGCONFIG(TAG,
+                "GL-R01 I2C:\n"
+                "  Firmware Version: 0x%04X",
+                this->version_);
   LOG_I2C_DEVICE(this);
   LOG_SENSOR(" ", "Distance", this);
 }
@@ -63,5 +62,4 @@ void GLR01I2CComponent::read_distance_() {
   }
 }
 
-}  // namespace gl_r01_i2c
-}  // namespace esphome
+}  // namespace esphome::gl_r01_i2c

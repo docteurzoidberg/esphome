@@ -1,15 +1,18 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "esphome/core/hal.h"
 #include "addressable_light.h"
 
-namespace esphome {
-namespace light {
+namespace esphome::light {
 
 class AddressableLightWrapper : public light::AddressableLight {
  public:
-  explicit AddressableLightWrapper(light::LightState *light_state) : light_state_(light_state) {
-    this->wrapper_state_ = new uint8_t[5];  // NOLINT(cppcoreguidelines-owning-memory)
+  explicit AddressableLightWrapper(light::LightState *light_state)
+      : light_state_(light_state),
+        wrapper_accessor_(this->wrapper_state_, &this->wrapper_state_[4], ChannelColors{0, 1, 2, 3},
+                          &this->correction_) {
+    this->accessor_ = &this->wrapper_accessor_;
   }
 
   int32_t size() const override { return 1; }
@@ -21,19 +24,21 @@ class AddressableLightWrapper : public light::AddressableLight {
 
     // Choose which color mode to use.
     // This is ordered by how closely each color mode matches the underlying RGBW data structure used in LightPartition.
-    ColorMode color_mode_precedence[] = {ColorMode::RGB_WHITE,
-                                         ColorMode::RGB_COLD_WARM_WHITE,
-                                         ColorMode::RGB_COLOR_TEMPERATURE,
-                                         ColorMode::RGB,
-                                         ColorMode::WHITE,
-                                         ColorMode::COLD_WARM_WHITE,
-                                         ColorMode::COLOR_TEMPERATURE,
-                                         ColorMode::BRIGHTNESS,
-                                         ColorMode::ON_OFF,
-                                         ColorMode::UNKNOWN};
+    // In flash: a local array is copied from a RAM constant on ESP8266
+    static constexpr ColorMode COLOR_MODE_PRECEDENCE[] PROGMEM = {ColorMode::RGB_WHITE,
+                                                                  ColorMode::RGB_COLD_WARM_WHITE,
+                                                                  ColorMode::RGB_COLOR_TEMPERATURE,
+                                                                  ColorMode::RGB,
+                                                                  ColorMode::WHITE,
+                                                                  ColorMode::COLD_WARM_WHITE,
+                                                                  ColorMode::COLOR_TEMPERATURE,
+                                                                  ColorMode::BRIGHTNESS,
+                                                                  ColorMode::ON_OFF,
+                                                                  ColorMode::UNKNOWN};
 
     LightTraits parent_traits = this->light_state_->get_traits();
-    for (auto cm : color_mode_precedence) {
+    for (const auto &entry : COLOR_MODE_PRECEDENCE) {
+      auto cm = static_cast<ColorMode>(progmem_read_byte(reinterpret_cast<const uint8_t *>(&entry)));
       if (parent_traits.supports_color_mode(cm)) {
         this->color_mode_ = cm;
         break;
@@ -77,11 +82,10 @@ class AddressableLightWrapper : public light::AddressableLight {
       return;
     }
 
-    float gamma = this->light_state_->get_gamma_correct();
-    float r = gamma_uncorrect(this->wrapper_state_[0] / 255.0f, gamma);
-    float g = gamma_uncorrect(this->wrapper_state_[1] / 255.0f, gamma);
-    float b = gamma_uncorrect(this->wrapper_state_[2] / 255.0f, gamma);
-    float w = gamma_uncorrect(this->wrapper_state_[3] / 255.0f, gamma);
+    float r = this->light_state_->gamma_uncorrect_lut(this->wrapper_state_[0] / 255.0f);
+    float g = this->light_state_->gamma_uncorrect_lut(this->wrapper_state_[1] / 255.0f);
+    float b = this->light_state_->gamma_uncorrect_lut(this->wrapper_state_[2] / 255.0f);
+    float w = this->light_state_->gamma_uncorrect_lut(this->wrapper_state_[3] / 255.0f);
 
     auto call = this->light_state_->make_call();
 
@@ -113,15 +117,10 @@ class AddressableLightWrapper : public light::AddressableLight {
   }
 
  protected:
-  light::ESPColorView get_view_internal(int32_t index) const override {
-    return {&this->wrapper_state_[0], &this->wrapper_state_[1], &this->wrapper_state_[2],
-            &this->wrapper_state_[3], &this->wrapper_state_[4], &this->correction_};
-  }
-
   light::LightState *light_state_;
-  uint8_t *wrapper_state_;
+  CorrectedBufferColorAccessor wrapper_accessor_;
+  uint8_t wrapper_state_[5]{};
   ColorMode color_mode_{ColorMode::UNKNOWN};
 };
 
-}  // namespace light
-}  // namespace esphome
+}  // namespace esphome::light

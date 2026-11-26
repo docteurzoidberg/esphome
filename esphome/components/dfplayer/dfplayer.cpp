@@ -1,10 +1,10 @@
 #include "dfplayer.h"
+#include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
-namespace esphome {
-namespace dfplayer {
+namespace esphome::dfplayer {
 
-static const char *const TAG = "dfplayer";
+ESPHOME_LOG_TAG(TAG, "dfplayer");
 
 void DFPlayer::next() {
   this->ack_set_is_playing_ = true;
@@ -102,6 +102,13 @@ void DFPlayer::random() {
   this->send_cmd_(0x18);
 }
 
+void DFPlayer::set_current_track_repeat(bool enable) {
+  uint16_t arg = enable ? 0x00 : 0x01;
+  ESP_LOGD(TAG, "Setting current track repeat to %s",
+           enable ? LOG_STR_LITERAL("enabled") : LOG_STR_LITERAL("disabled"));
+  this->send_cmd_(0x19, arg);
+}
+
 void DFPlayer::play_folder(uint16_t folder, uint16_t file) {
   ESP_LOGD(TAG, "Playing file %d in folder %d", file, folder);
   if (folder < 100 && file < 256) {
@@ -117,12 +124,7 @@ void DFPlayer::play_folder(uint16_t folder, uint16_t file) {
 
 void DFPlayer::send_cmd_(uint8_t cmd, uint16_t argument) {
   uint8_t buffer[10]{0x7e, 0xff, 0x06, cmd, 0x01, (uint8_t) (argument >> 8), (uint8_t) argument, 0x00, 0x00, 0xef};
-  uint16_t checksum = 0;
-  for (uint8_t i = 1; i < 7; i++)
-    checksum += buffer[i];
-  checksum = -checksum;
-  buffer[7] = checksum >> 8;
-  buffer[8] = (uint8_t) checksum;
+  put_be16(buffer + 7, -sum16_bytes(buffer + 1, 6));
 
   this->sent_cmd_ = cmd;
 
@@ -131,51 +133,45 @@ void DFPlayer::send_cmd_(uint8_t cmd, uint16_t argument) {
 }
 
 void DFPlayer::loop() {
-  // Read message
-  while (this->available()) {
-    uint8_t byte;
-    this->read_byte(&byte);
-
+  this->read_available([this](uint8_t byte) {
     if (this->read_pos_ == DFPLAYER_READ_BUFFER_LENGTH)
       this->read_pos_ = 0;
 
     switch (this->read_pos_) {
       case 0:  // Start mark
         if (byte != 0x7E)
-          continue;
+          return;
         break;
       case 1:  // Version
         if (byte != 0xFF) {
           ESP_LOGW(TAG, "Expected Version 0xFF, got %#02x", byte);
           this->read_pos_ = 0;
-          continue;
+          return;
         }
         break;
       case 2:  // Buffer length
         if (byte != 0x06) {
           ESP_LOGW(TAG, "Expected Buffer length 0x06, got %#02x", byte);
           this->read_pos_ = 0;
-          continue;
+          return;
         }
         break;
       case 9:  // End byte
 #ifdef ESPHOME_LOG_HAS_VERY_VERBOSE
+        this->read_buffer_[this->read_pos_] = byte;  // stored after the switch; the dump needs it now
         char byte_sequence[100];
-        byte_sequence[0] = '\0';
-        for (size_t i = 0; i < this->read_pos_ + 1; ++i) {
-          snprintf(byte_sequence + strlen(byte_sequence), sizeof(byte_sequence) - strlen(byte_sequence), "%02X ",
-                   this->read_buffer_[i]);
-        }
+        format_hex_pretty_to(byte_sequence, reinterpret_cast<const uint8_t *>(this->read_buffer_), this->read_pos_ + 1,
+                             ' ');
         ESP_LOGVV(TAG, "Received byte sequence: %s", byte_sequence);
 #endif
         if (byte != 0xEF) {
           ESP_LOGW(TAG, "Expected end byte 0xEF, got %#02x", byte);
           this->read_pos_ = 0;
-          continue;
+          return;
         }
         // Parse valid received command
         uint8_t cmd = this->read_buffer_[3];
-        uint16_t argument = (this->read_buffer_[5] << 8) | this->read_buffer_[6];
+        uint16_t argument = encode_uint16(this->read_buffer_[5], this->read_buffer_[6]);
 
         ESP_LOGV(TAG, "Received message cmd: %#02x arg %#04x", cmd, argument);
 
@@ -238,6 +234,8 @@ void DFPlayer::loop() {
                 ESP_LOGE(TAG, "Entered into sleep mode");
                 this->is_playing_ = false;
                 break;
+              default:
+                break;
             }
             break;
           case 0x41:
@@ -251,6 +249,7 @@ void DFPlayer::loop() {
             ESP_LOGV(TAG, "Playback finished (USB drive)");
             this->is_playing_ = false;
             this->on_finished_playback_callback_.call();
+            break;
           case 0x3D:
             ESP_LOGV(TAG, "Playback finished (SD card)");
             this->is_playing_ = false;
@@ -261,16 +260,12 @@ void DFPlayer::loop() {
         }
         this->sent_cmd_ = 0;
         this->read_pos_ = 0;
-        continue;
+        return;
     }
     this->read_buffer_[this->read_pos_] = byte;
     this->read_pos_++;
-  }
+  });
 }
-void DFPlayer::dump_config() {
-  ESP_LOGCONFIG(TAG, "DFPlayer:");
-  this->check_uart_settings(9600);
-}
+void DFPlayer::dump_config() { ESP_LOGCONFIG(TAG, "DFPlayer:"); }
 
-}  // namespace dfplayer
-}  // namespace esphome
+}  // namespace esphome::dfplayer

@@ -1,0 +1,171 @@
+#pragma once
+
+#include "esphome/core/component.h"
+#include "esphome/core/hal.h"
+#include "esphome/core/helpers.h"
+#include "esphome/components/spi/spi.h"
+#include "esphome/core/automation.h"
+#include "cc1101defs.h"
+#include <vector>
+
+namespace esphome::cc1101 {
+
+enum class CC1101Error { NONE = 0, TIMEOUT, PARAMS, CRC_ERROR, FIFO_OVERFLOW, PLL_LOCK };
+using packet_length_func_t = int32_t (*)(const std::vector<uint8_t> &);
+
+class CC1101Listener {
+ public:
+  virtual void on_packet(const std::vector<uint8_t> &packet, float freq_offset, float rssi, uint8_t lqi) = 0;
+};
+
+class CC1101Component final : public Component,
+                              public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW,
+                                                    spi::CLOCK_PHASE_LEADING, spi::DATA_RATE_1MHZ> {
+ public:
+  CC1101Component();
+
+  void setup() override;
+  void loop() override;
+  void dump_config() override;
+  void configure();
+
+  // Actions
+  void begin_tx();
+  void begin_rx();
+  void reset();
+  void set_idle();
+  void power_down();
+  void wake_up();
+
+  // GDO Pin Configuration
+  void set_gdo0_pin(InternalGPIOPin *pin) { this->gdo0_pin_ = pin; }
+
+  // Configuration Setters
+  void set_output_power(float value);
+  void set_rx_attenuation(RxAttenuation value);
+  void set_dc_blocking_filter(bool value);
+
+  // Tuner settings
+  void set_frequency(float value);
+  void set_if_frequency(float value);
+  void set_filter_bandwidth(float value);
+  void set_channel(uint8_t value);
+  void set_channel_spacing(float value);
+  void set_fsk_deviation(float value);
+  void set_msk_deviation(uint8_t value);
+  void set_symbol_rate(float value);
+  void set_sync_mode(SyncMode value);
+  void set_carrier_sense_above_threshold(bool value);
+  void set_modulation_type(Modulation value);
+  void set_manchester(bool value);
+  void set_num_preamble(uint8_t value);
+  void set_sync1(uint8_t value);
+  void set_sync0(uint8_t value);
+
+  // AGC settings
+  void set_magn_target(MagnTarget value);
+  void set_max_lna_gain(MaxLnaGain value);
+  void set_max_dvga_gain(MaxDvgaGain value);
+  void set_carrier_sense_abs_thr(int8_t value);
+  void set_carrier_sense_rel_thr(CarrierSenseRelThr value);
+  void set_lna_priority(bool value);
+  void set_filter_length_fsk_msk(FilterLengthFskMsk value);
+  void set_filter_length_ask_ook(FilterLengthAskOok value);
+  void set_freeze(Freeze value);
+  void set_wait_time(WaitTime value);
+  void set_hyst_level(HystLevel value);
+
+  // Frequency offset compensation and bit synchronization settings
+  void set_foc_bs_cs_gate(bool value);
+  void set_foc_limit(FocLimit value);
+  void set_foc_pre_k(FocPreK value);
+  void set_foc_post_k(FocPostK value);
+  void set_bs_limit(BsLimit value);
+  void set_bs_pre_ki(BsPreKi value);
+  void set_bs_pre_kp(BsPreKp value);
+  void set_bs_post_ki(BsPostKi value);
+  void set_bs_post_kp(BsPostKp value);
+
+  // Packet mode settings
+  void set_packet_mode(bool value);
+  void set_packet_length(uint16_t value);
+#ifdef USE_CC1101_LONG_PACKET
+  void set_packet_length_lambda(packet_length_func_t func);
+#endif
+  void set_crc_enable(bool value);
+  void set_whitening(bool value);
+
+  // Packet mode operations
+  CC1101Error transmit_packet(const std::vector<uint8_t> &packet) {
+    return this->transmit_packet(packet.data(), packet.size());
+  }
+  CC1101Error transmit_packet(const uint8_t *data, size_t len);
+  void register_listener(CC1101Listener *listener) { this->listeners_.push_back(listener); }
+  Trigger<std::vector<uint8_t>, float, float, uint8_t> *get_packet_trigger() { return &this->packet_trigger_; }
+
+ protected:
+  uint16_t chip_id_{0};
+  bool initialized_{false};
+  bool packet_mode_{false};
+  bool sleeping_{false};
+  bool registers_dirty_{false};
+
+  float output_power_requested_{10.0f};
+  float output_power_effective_{10.0f};
+  uint8_t pa_table_[PA_TABLE_SIZE]{};
+
+  CC1101State state_;
+
+  // GDO pin for packet reception
+  InternalGPIOPin *gdo0_pin_{nullptr};
+  // Inline like App.get_loop_component_start_time(): on RP2040 an out-of-line IRAM_ATTR function in the same
+  // file as that inline one fails with a section type conflict
+  static void IRAM_ATTR gpio_intr(CC1101Component *arg) { arg->enable_loop_soon_any_context(); }
+
+  // Packet handling
+  void call_listeners_(const std::vector<uint8_t> &packet, float freq_offset, float rssi, uint8_t lqi);
+  void configure_packet_mode_();
+  void reconfigure_packet_length_();
+  float symbol_rate_() const;
+#ifdef USE_CC1101_LONG_PACKET
+  bool is_long_packet_mode_() const;
+  void arm_length_(uint16_t length);
+  void reset_long_packet_rx_();
+  void restart_long_packet_rx_();
+  void loop_long_packet_();
+  void handle_long_packet_(uint8_t rx_bytes);
+  void finish_long_packet_();
+  void maybe_switch_long_packet_to_fixed_();
+#endif
+  Trigger<std::vector<uint8_t>, float, float, uint8_t> packet_trigger_;
+  std::vector<uint8_t> packet_;
+  std::vector<CC1101Listener *> listeners_;
+#ifdef USE_CC1101_LONG_PACKET
+  packet_length_func_t packet_length_func_{nullptr};
+  uint32_t packet_last_byte_ms_{0};
+#endif
+  uint16_t packet_length_{0};
+#ifdef USE_CC1101_LONG_PACKET
+  uint16_t packet_expected_length_{0};
+  int8_t long_packet_rssi_{0};  // raw RSSI register
+  HighFrequencyLoopRequester high_freq_;
+#endif
+
+  // Low-level Helpers
+  uint8_t strobe_(Command cmd);
+  void write_registers_();
+  void write_(Register reg);
+  void write_(Register reg, uint8_t value);
+  void write_(Register reg, const uint8_t *buffer, size_t length);
+  void read_(Register reg);
+  void read_(Register reg, uint8_t *buffer, size_t length);
+
+  // State Management
+  bool wait_for_state_(State target_state, uint32_t timeout_ms = 100);
+  bool enter_calibrated_(State target_state, Command cmd);
+  void enter_idle_();
+  bool enter_rx_();
+  bool enter_tx_();
+};
+
+}  // namespace esphome::cc1101

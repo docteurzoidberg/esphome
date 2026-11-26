@@ -1,12 +1,11 @@
 #include "bedjet_sensor.h"
 #include "esphome/core/log.h"
 
-namespace esphome {
-namespace bedjet {
+namespace esphome::bedjet {
 
 std::string BedjetSensor::describe() { return "BedJet Sensor"; }
 
-void BedjetSensor::dump_config() {
+void BedjetSensor::dump_child_config() {
   ESP_LOGCONFIG(TAG, "BedJet Sensor:");
   LOG_SENSOR("  ", "Outlet Temperature", this->outlet_temperature_sensor_);
   LOG_SENSOR("  ", "Ambient Temperature", this->ambient_temperature_sensor_);
@@ -30,5 +29,4 @@ void BedjetSensor::on_status(const BedjetStatusPacket *data) {
   }
 }
 
-}  // namespace bedjet
-}  // namespace esphome
+}  // namespace esphome::bedjet

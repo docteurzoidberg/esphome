@@ -1,0 +1,38 @@
+name: CI - GitHub Scripts
+
+on:
+  push:
+    branches: [dev, beta, release]
+    paths:
+      - ".github/scripts/**"
+      - ".github/workflows/ci-github-scripts.yml"
+  pull_request:
+    paths:
+      - ".github/scripts/**"
+      - ".github/workflows/ci-github-scripts.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test-auto-label-pr:
+    name: Test auto-label-pr scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code from GitHub
+        uses: actions/checkout@v7.0.1
+
+      - name: Run tests
+        working-directory: .github/scripts/auto-label-pr
+        run: npm test
+
+  test-request-copilot-review:
+    name: Test request-copilot-review script
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code from GitHub
+        uses: actions/checkout@v7.0.1
+
+      - name: Run tests
+        working-directory: .github/scripts/request-copilot-review
+        run: npm test

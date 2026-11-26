@@ -1,12 +1,11 @@
 #include "esphome/core/log.h"
 #include "tuya_switch.h"
 
-namespace esphome {
-namespace tuya {
+namespace esphome::tuya {
 
-static const char *const TAG = "tuya.switch";
+ESPHOME_LOG_TAG(TAG, "tuya.switch");
 
-void TuyaSwitch::setup() {
+void TuyaSwitch::register_listeners() {
   this->parent_->register_listener(this->switch_id_, [this](const TuyaDatapoint &datapoint) {
     ESP_LOGV(TAG, "MCU reported switch %u is: %s", this->switch_id_, ONOFF(datapoint.value_bool));
     this->publish_state(datapoint.value_bool);
@@ -19,10 +18,9 @@ void TuyaSwitch::write_state(bool state) {
   this->publish_state(state);
 }
 
-void TuyaSwitch::dump_config() {
+void TuyaSwitch::dump_child_config() {
   LOG_SWITCH("", "Tuya Switch", this);
   ESP_LOGCONFIG(TAG, "  Switch has datapoint ID %u", this->switch_id_);
 }
 
-}  // namespace tuya
-}  // namespace esphome
+}  // namespace esphome::tuya

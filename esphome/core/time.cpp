@@ -1,20 +1,180 @@
 #include "time.h"  // NOLINT
 #include "helpers.h"
+#include "time_utc.h"
 
-#include <cinttypes>
+#include <algorithm>
+#ifdef USE_TIME_TIMEZONE
+#include "esphome/components/time/posix_tz.h"
+#endif
 
 namespace esphome {
 
-uint8_t days_in_month(uint8_t month, uint16_t year) {
-  static const uint8_t DAYS_IN_MONTH[] = {0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-  if (month == 2 && (year % 4 == 0))
-    return 29;
-  return DAYS_IN_MONTH[month];
+namespace internal {
+
+// A year divisible by 100 is divisible by 400 exactly when it is divisible by 16
+bool is_leap_year(int year) { return (year & 3) == 0 && (year % 100 != 0 || (year & 15) == 0); }
+
+// Count leap years in [1, year]. Shifted by 400 years (97 leap years) so it stays right for year 0, whose year
+// before is -1
+static constexpr int count_leap_years_up_to(int year) {
+  const unsigned shifted = year + 400;
+  return static_cast<int>(shifted / 4 - shifted / 100 + shifted / 400) - 97;
+}
+
+static constexpr int EPOCH_YEAR = 1970;
+static constexpr int LEAP_YEARS_BEFORE_EPOCH = count_leap_years_up_to(EPOCH_YEAR - 1);
+static constexpr int DAYS_PER_YEAR = 365;
+static constexpr int32_t DAYS_FROM_YEAR_0 = 719528;  // 0000-01-01 to 1970-01-01
+static constexpr int SECONDS_PER_DAY = 86400;
+
+int32_t days_to_year_start(int year) {
+  return DAYS_PER_YEAR * (year - EPOCH_YEAR) + (count_leap_years_up_to(year - 1) - LEAP_YEARS_BEFORE_EPOCH);
+}
+
+// Every year has at least 365 days, so the estimate is never early; step back to the year that holds the day.
+// Leaves the day of that year in days.
+static int days_to_year(int32_t &days) {
+  // Signed: a local time just before year 0 rounds up to year 0 and steps back to -1
+  int year = (days + DAYS_FROM_YEAR_0) / DAYS_PER_YEAR;
+  int32_t year_start;
+  while (days < (year_start = days_to_year_start(year)))
+    year--;
+  days -= year_start;
+  return year;
+}
+
+int days_in_month(int year, int month) {
+  if (month == 2)
+    return 28 + is_leap_year(year);
+  // 31 days in odd months up to July and even months from August
+  return 30 + ((month ^ (month >> 3)) & 1);
+}
+
+// One 64-bit division, and the remainder from 32-bit math instead of a 64-bit modulo
+static int32_t epoch_to_days(time_t epoch, int32_t &secs) {
+  int32_t days = static_cast<int32_t>(epoch / SECONDS_PER_DAY);
+  secs = static_cast<int32_t>(static_cast<uint32_t>(epoch) - static_cast<uint32_t>(days) * SECONDS_PER_DAY);
+  if (secs < 0) {
+    days--;
+    secs += SECONDS_PER_DAY;
+  }
+  return days;
+}
+
+int epoch_to_year(time_t epoch) {
+  int32_t secs;
+  int32_t days = epoch_to_days(epoch, secs);
+  return days_to_year(days);
+}
+
+void epoch_to_tm_utc(time_t epoch, struct tm *out_tm) {
+  int32_t remaining_secs;
+  int32_t days = epoch_to_days(epoch, remaining_secs);
+
+  out_tm->tm_sec = remaining_secs % 60;
+  remaining_secs /= 60;
+  out_tm->tm_min = remaining_secs % 60;
+  out_tm->tm_hour = remaining_secs / 60;
+
+  // Day of week (Jan 1, 1970 was Thursday = 4)
+  out_tm->tm_wday = (days + 4) % 7;
+  if (out_tm->tm_wday < 0)
+    out_tm->tm_wday += 7;
+
+  // Calculate year (updates days to day-of-year)
+  int year = days_to_year(days);
+  out_tm->tm_year = year - 1900;
+  out_tm->tm_yday = days;
+
+  // Calculate month and day
+  int month = 1;
+  int dim;
+  while (days >= (dim = days_in_month(year, month))) {
+    days -= dim;
+    month++;
+  }
+
+  out_tm->tm_mon = month - 1;
+  out_tm->tm_mday = days + 1;
+  out_tm->tm_isdst = 0;
+}
+
+}  // namespace internal
+
+uint8_t days_in_month(uint8_t month, uint16_t year) { return internal::days_in_month(year, month); }
+
+static uint16_t days_in_year(uint16_t year) { return internal::is_leap_year(year) ? 366 : 365; }
+
+ESPTime ESPTime::from_epoch_utc(time_t epoch) {
+  if (!internal::epoch_in_range(epoch))
+    return ESPTime{};
+  struct tm c_tm;
+  internal::epoch_to_tm_utc(epoch, &c_tm);
+  return ESPTime::from_c_tm(&c_tm, epoch);
 }
 
 size_t ESPTime::strftime(char *buffer, size_t buffer_len, const char *format) {
   struct tm c_tm = this->to_c_tm();
+#ifdef USE_TIME_TIMEZONE
+  // ::strftime uses libc's internal timezone state for %Z and %z, but we
+  // eliminated setenv("TZ")/tzset() on embedded platforms to save flash.
+  // Substitute %Z and %z with correct values from our parsed timezone.
+  // Quick scan: does format contain %Z or %z (but not %%Z/%%z)?
+  bool needs_subst = false;
+  for (const char *p = format; *p; p++) {
+    if (*p == '%' && *(p + 1)) {
+      p++;
+      if (*p == '%')
+        continue;  // %% is a literal %, skip
+      if (*p == 'Z' || *p == 'z') {
+        needs_subst = true;
+        break;
+      }
+    }
+  }
+  if (needs_subst) {
+    const auto &tz = time::get_global_tz();
+    char designation[6];  // "+HHMM" + null
+    int32_t offset = c_tm.tm_isdst > 0 ? tz.dst_offset_seconds : tz.std_offset_seconds;
+    time::format_designation(offset, designation, sizeof(designation));
+
+    char modified[STRFTIME_BUFFER_SIZE];
+    char *out = modified;
+    char *out_end = modified + sizeof(modified) - 1;
+    for (const char *p = format; *p && out < out_end; p++) {
+      if (*p == '%') {
+        if (*(p + 1) == '%') {
+          // %% → copy both percent signs (literal %)
+          *out++ = *p++;
+          if (out < out_end)
+            *out++ = *p;
+        } else if (*(p + 1) == 'Z' || *(p + 1) == 'z') {
+          p++;  // skip the Z/z
+          for (const char *d = designation; *d && out < out_end; d++)
+            *out++ = *d;
+        } else {
+          *out++ = *p;
+        }
+      } else {
+        *out++ = *p;
+      }
+    }
+    *out = '\0';
+    return ::strftime(buffer, buffer_len, modified, &c_tm);
+  }
+#endif
   return ::strftime(buffer, buffer_len, format, &c_tm);
+}
+
+size_t ESPTime::strftime_to(std::span<char, STRFTIME_BUFFER_SIZE> buffer, const char *format) {
+  size_t len = this->strftime(buffer.data(), buffer.size(), format);
+  if (len > 0) {
+    return len;
+  }
+  // Write "ERROR" to buffer on failure for consistent behavior
+  constexpr char error_str[] = "ERROR";
+  std::copy_n(error_str, sizeof(error_str), buffer.data());
+  return sizeof(error_str) - 1;  // Length excluding null terminator
 }
 
 ESPTime ESPTime::from_c_tm(struct tm *c_tm, time_t c_time) {
@@ -33,7 +193,7 @@ ESPTime ESPTime::from_c_tm(struct tm *c_tm, time_t c_time) {
 }
 
 struct tm ESPTime::to_c_tm() {
-  struct tm c_tm {};
+  struct tm c_tm{};
   c_tm.tm_sec = this->second;
   c_tm.tm_min = this->minute;
   c_tm.tm_hour = this->hour;
@@ -46,73 +206,127 @@ struct tm ESPTime::to_c_tm() {
   return c_tm;
 }
 
-std::string ESPTime::strftime(const std::string &format) {
-  std::string timestr;
-  timestr.resize(format.size() * 4);
-  struct tm c_tm = this->to_c_tm();
-  size_t len = ::strftime(&timestr[0], timestr.size(), format.c_str(), &c_tm);
-  while (len == 0) {
-    if (timestr.size() >= 128) {
-      // strftime has failed for reasons unrelated to the size of the buffer
-      // so return a formatting error
-      return "ERROR";
-    }
-    timestr.resize(timestr.size() * 2);
-    len = ::strftime(&timestr[0], timestr.size(), format.c_str(), &c_tm);
-  }
-  timestr.resize(len);
-  return timestr;
+std::string ESPTime::strftime(const char *format) {
+  char buf[STRFTIME_BUFFER_SIZE];
+  size_t len = this->strftime_to(buf, format);
+  return std::string(buf, len);
 }
 
-bool ESPTime::strptime(const std::string &time_to_parse, ESPTime &esp_time) {
-  uint16_t year;
-  uint8_t month;
-  uint8_t day;
-  uint8_t hour;
-  uint8_t minute;
-  uint8_t second;
-  int num;
-
-  if (sscanf(time_to_parse.c_str(), "%04hu-%02hhu-%02hhu %02hhu:%02hhu:%02hhu %n", &year, &month, &day,  // NOLINT
-             &hour,                                                                                      // NOLINT
-             &minute,                                                                                    // NOLINT
-             &second, &num) == 6 &&                                                                      // NOLINT
-      num == time_to_parse.size()) {
-    esp_time.year = year;
-    esp_time.month = month;
-    esp_time.day_of_month = day;
-    esp_time.hour = hour;
-    esp_time.minute = minute;
-    esp_time.second = second;
-  } else if (sscanf(time_to_parse.c_str(), "%04hu-%02hhu-%02hhu %02hhu:%02hhu %n", &year, &month, &day,  // NOLINT
-                    &hour,                                                                               // NOLINT
-                    &minute, &num) == 5 &&                                                               // NOLINT
-             num == time_to_parse.size()) {
-    esp_time.year = year;
-    esp_time.month = month;
-    esp_time.day_of_month = day;
-    esp_time.hour = hour;
-    esp_time.minute = minute;
-    esp_time.second = 0;
-  } else if (sscanf(time_to_parse.c_str(), "%02hhu:%02hhu:%02hhu %n", &hour, &minute, &second, &num) == 3 &&  // NOLINT
-             num == time_to_parse.size()) {
-    esp_time.hour = hour;
-    esp_time.minute = minute;
-    esp_time.second = second;
-  } else if (sscanf(time_to_parse.c_str(), "%02hhu:%02hhu %n", &hour, &minute, &num) == 2 &&  // NOLINT
-             num == time_to_parse.size()) {
-    esp_time.hour = hour;
-    esp_time.minute = minute;
-    esp_time.second = 0;
-  } else if (sscanf(time_to_parse.c_str(), "%04hu-%02hhu-%02hhu %n", &year, &month, &day, &num) == 3 &&  // NOLINT
-             num == time_to_parse.size()) {
-    esp_time.year = year;
-    esp_time.month = month;
-    esp_time.day_of_month = day;
-  } else {
-    return false;
+// Helper to parse exactly N digits, returns false if not enough digits
+static bool parse_digits(const char *&p, const char *end, int count, uint16_t &value) {
+  value = 0;
+  for (int i = 0; i < count; i++) {
+    if (p >= end || *p < '0' || *p > '9')
+      return false;
+    value = value * 10 + (*p - '0');
+    p++;
   }
   return true;
+}
+
+// Helper to check for expected character
+static bool expect_char(const char *&p, const char *end, char expected) {
+  if (p >= end || *p != expected)
+    return false;
+  p++;
+  return true;
+}
+
+bool ESPTime::strptime(const char *time_to_parse, size_t len, ESPTime &esp_time) {
+  // Supported formats:
+  //   YYYY-MM-DD HH:MM:SS (19 chars)
+  //   YYYY-MM-DD HH:MM    (16 chars)
+  //   YYYY-MM-DD          (10 chars)
+  //   HH:MM:SS            (8 chars)
+  //   HH:MM               (5 chars)
+
+  if (time_to_parse == nullptr || len == 0)
+    return false;
+
+  const char *p = time_to_parse;
+  const char *end = time_to_parse + len;
+  uint16_t v1, v2, v3, v4, v5, v6;
+
+  // Try date formats first (start with 4-digit year)
+  if (len >= 10 && time_to_parse[4] == '-') {
+    // YYYY-MM-DD...
+    if (!parse_digits(p, end, 4, v1))
+      return false;
+    if (!expect_char(p, end, '-'))
+      return false;
+    if (!parse_digits(p, end, 2, v2))
+      return false;
+    if (!expect_char(p, end, '-'))
+      return false;
+    if (!parse_digits(p, end, 2, v3))
+      return false;
+
+    esp_time.year = v1;
+    esp_time.month = v2;
+    esp_time.day_of_month = v3;
+
+    if (p == end) {
+      // YYYY-MM-DD (date only)
+      return true;
+    }
+
+    if (!expect_char(p, end, ' '))
+      return false;
+
+    // Continue with time part: HH:MM[:SS]
+    if (!parse_digits(p, end, 2, v4))
+      return false;
+    if (!expect_char(p, end, ':'))
+      return false;
+    if (!parse_digits(p, end, 2, v5))
+      return false;
+
+    esp_time.hour = v4;
+    esp_time.minute = v5;
+
+    if (p == end) {
+      // YYYY-MM-DD HH:MM
+      esp_time.second = 0;
+      return true;
+    }
+
+    if (!expect_char(p, end, ':'))
+      return false;
+    if (!parse_digits(p, end, 2, v6))
+      return false;
+
+    esp_time.second = v6;
+    return p == end;  // YYYY-MM-DD HH:MM:SS
+  }
+
+  // Try time-only formats (HH:MM[:SS])
+  if (len >= 5 && time_to_parse[2] == ':') {
+    if (!parse_digits(p, end, 2, v1))
+      return false;
+    if (!expect_char(p, end, ':'))
+      return false;
+    if (!parse_digits(p, end, 2, v2))
+      return false;
+
+    esp_time.hour = v1;
+    esp_time.minute = v2;
+
+    if (p == end) {
+      // HH:MM
+      esp_time.second = 0;
+      return true;
+    }
+
+    if (!expect_char(p, end, ':'))
+      return false;
+    if (!parse_digits(p, end, 2, v3))
+      return false;
+
+    esp_time.second = v3;
+    return p == end;  // HH:MM:SS
+  }
+
+  return false;
 }
 
 void ESPTime::increment_second() {
@@ -136,8 +350,7 @@ void ESPTime::increment_second() {
     increment_time_value(this->month, 1, 13);
   }
 
-  uint16_t days_in_year = (this->year % 4 == 0) ? 366 : 365;
-  if (increment_time_value(this->day_of_year, 1, days_in_year + 1)) {
+  if (increment_time_value(this->day_of_year, 1, days_in_year(this->year) + 1)) {
     // day of year roll-over, increment year
     this->year++;
   }
@@ -154,22 +367,22 @@ void ESPTime::increment_day() {
     increment_time_value(this->month, 1, 13);
   }
 
-  uint16_t days_in_year = (this->year % 4 == 0) ? 366 : 365;
-  if (increment_time_value(this->day_of_year, 1, days_in_year + 1)) {
+  if (increment_time_value(this->day_of_year, 1, days_in_year(this->year) + 1)) {
     // day of year roll-over, increment year
     this->year++;
   }
 }
 
-void ESPTime::recalc_timestamp_utc(bool use_day_of_year) {
-  time_t res = 0;
-  if (!this->fields_in_range()) {
+void ESPTime::recalc_timestamp_utc(bool use_day_of_year) { this->recalc_timestamp_utc_(use_day_of_year); }
+
+bool ESPTime::recalc_timestamp_utc_(bool use_day_of_year) {
+  if (!this->fields_in_range(false, use_day_of_year)) {
     this->timestamp = -1;
-    return;
+    return false;
   }
 
-  for (int i = 1970; i < this->year; i++)
-    res += (i % 4 == 0) ? 366 : 365;
+  // 64-bit, so a 32-bit time_t near its minimum does not overflow before the seconds are added
+  int64_t res = internal::days_to_year_start(this->year);
 
   if (use_day_of_year) {
     res += this->day_of_year - 1;
@@ -185,45 +398,68 @@ void ESPTime::recalc_timestamp_utc(bool use_day_of_year) {
   res += this->minute;
   res *= 60;
   res += this->second;
-  this->timestamp = res;
+  this->timestamp = static_cast<time_t>(res);
+  return true;
 }
 
 void ESPTime::recalc_timestamp_local() {
-  struct tm tm;
+#ifdef USE_TIME_TIMEZONE
+  // Calculate timestamp as if fields were UTC
+  // -1 is also a real time (1969-12-31 23:59:59), so ask for validity instead
+  if (!this->recalc_timestamp_utc_(false)) {
+    return;
+  }
 
-  tm.tm_year = this->year - 1900;
-  tm.tm_mon = this->month - 1;
-  tm.tm_mday = this->day_of_month;
-  tm.tm_hour = this->hour;
-  tm.tm_min = this->minute;
-  tm.tm_sec = this->second;
-  tm.tm_isdst = -1;
+  // Now convert from local to UTC by adding the offset
+  // POSIX: local = utc - offset, so utc = local + offset
+  const auto &tz = time::get_global_tz();
 
-  this->timestamp = mktime(&tm);
+  if (!tz.has_dst()) {
+    // No DST - just apply standard offset
+    this->timestamp += tz.std_offset_seconds;
+    return;
+  }
+
+  // Try both interpretations to match libc mktime() with tm_isdst=-1
+  // For ambiguous times (fall-back repeated hour), prefer standard time
+  // For invalid times (spring-forward skipped hour), libc normalizes forward
+  time_t utc_if_dst = this->timestamp + tz.dst_offset_seconds;
+  time_t utc_if_std = this->timestamp + tz.std_offset_seconds;
+
+  bool dst_valid = time::is_in_dst(utc_if_dst, tz);
+  bool std_valid = !time::is_in_dst(utc_if_std, tz);
+
+  if (dst_valid && !std_valid) {
+    // Only DST interpretation is valid
+    this->timestamp = utc_if_dst;
+  } else {
+    // All other cases use standard offset:
+    // - Both valid (ambiguous fall-back repeated hour): prefer standard time
+    // - Only standard valid: straightforward
+    // - Neither valid (spring-forward skipped hour): std offset normalizes
+    //   forward to match libc mktime(), e.g. 02:30 CST -> 03:30 CDT
+    this->timestamp = utc_if_std;
+  }
+#else
+  // No timezone support - treat as UTC
+  this->recalc_timestamp_utc(false);
+#endif
 }
 
 int32_t ESPTime::timezone_offset() {
-  int32_t offset = 0;
+#ifdef USE_TIME_TIMEZONE
   time_t now = ::time(nullptr);
-  auto local = ESPTime::from_epoch_local(now);
-  auto utc = ESPTime::from_epoch_utc(now);
-  bool negative = utc.hour > local.hour && local.day_of_year <= utc.day_of_year;
-
-  if (utc.minute > local.minute) {
-    local.minute += 60;
-    local.hour -= 1;
+  const auto &tz = time::get_global_tz();
+  // POSIX offset is positive west, but we return offset to add to UTC to get local
+  // So we negate the POSIX offset
+  if (time::is_in_dst(now, tz)) {
+    return -tz.dst_offset_seconds;
   }
-  offset += (local.minute - utc.minute) * 60;
-
-  if (negative) {
-    offset -= (utc.hour - local.hour) * 3600;
-  } else {
-    if (utc.hour > local.hour) {
-      local.hour += 24;
-    }
-    offset += (local.hour - utc.hour) * 3600;
-  }
-  return offset;
+  return -tz.std_offset_seconds;
+#else
+  // No timezone support - no offset
+  return 0;
+#endif
 }
 
 bool ESPTime::operator<(const ESPTime &other) const { return this->timestamp < other.timestamp; }

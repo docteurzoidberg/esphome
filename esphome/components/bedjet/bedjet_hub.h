@@ -6,10 +6,9 @@
 #include "esphome/core/component.h"
 #include "esphome/core/defines.h"
 #include "esphome/core/hal.h"
+#include "esphome/core/helpers.h"
 #include "bedjet_child.h"
 #include "bedjet_codec.h"
-
-#include <vector>
 
 #ifdef USE_TIME
 #include "esphome/components/time/real_time_clock.h"
@@ -18,8 +17,7 @@
 
 #include <esp_gattc_api.h>
 
-namespace esphome {
-namespace bedjet {
+namespace esphome::bedjet {
 
 namespace espbt = esphome::esp32_ble_tracker;
 
@@ -34,7 +32,7 @@ static const espbt::ESPBTUUID BEDJET_NAME_UUID = espbt::ESPBTUUID::from_raw("000
 /**
  * Hub component connecting to the BedJet device over Bluetooth.
  */
-class BedJetHub : public esphome::ble_client::BLEClientNode, public PollingComponent {
+class BedJetHub final : public esphome::ble_client::BLEClientNode, public PollingComponent {
  public:
   /* BedJet functionality exposed to `BedJetClient` children and/or accessible from action lambdas. */
 
@@ -93,8 +91,7 @@ class BedJetHub : public esphome::ble_client::BLEClientNode, public PollingCompo
   bool has_status() { return this->codec_->has_status(); }
   const BedjetStatusPacket *get_status_packet() const { return this->codec_->get_status_packet(); }
 
-  /** Register a `BedJetClient` child component. */
-  void register_child(BedJetClient *obj);
+  SLOT_LIST(BedJetClient, children_, register_child, BEDJET_CHILD_COUNT)
 
   /** Set the status timeout.
    *
@@ -120,13 +117,7 @@ class BedJetHub : public esphome::ble_client::BLEClientNode, public PollingCompo
   float get_setup_priority() const override { return setup_priority::BLUETOOTH; }
 
   /** @return The BedJet's configured name, or the MAC address if not discovered yet. */
-  std::string get_name() {
-    if (this->name_.empty()) {
-      return this->parent_->address_str();
-    } else {
-      return this->name_;
-    }
-  }
+  const char *get_name() const { return this->name_[0] == '\0' ? this->parent_->address_str() : this->name_; }
 
   /* BLEClient overrides */
 
@@ -134,7 +125,6 @@ class BedJetHub : public esphome::ble_client::BLEClientNode, public PollingCompo
                            esp_ble_gattc_cb_param_t *param) override;
 
  protected:
-  std::vector<BedJetClient *> children_;
   void dispatch_status_();
   void dispatch_state_(bool is_ready);
 
@@ -152,9 +142,8 @@ class BedJetHub : public esphome::ble_client::BLEClientNode, public PollingCompo
   uint8_t set_notify_(bool enable);
   /** Send the `BedjetPacket` to the device. */
   uint8_t write_bedjet_packet_(BedjetPacket *pkt);
-  void set_name_(const std::string &name) { this->name_ = name; }
-
-  std::string name_;
+  // Only used in log lines; longer names are truncated
+  char name_[24]{};
 
   uint32_t last_notify_ = 0;
   inline void status_packet_ready_();
@@ -164,15 +153,14 @@ class BedJetHub : public esphome::ble_client::BLEClientNode, public PollingCompo
   std::unique_ptr<BedjetCodec> codec_;
 
   bool discover_characteristics_();
-  uint16_t char_handle_cmd_;
-  uint16_t char_handle_name_;
-  uint16_t char_handle_status_;
-  uint16_t config_descr_status_;
+  uint16_t char_handle_cmd_{0};
+  uint16_t char_handle_name_{0};
+  uint16_t char_handle_status_{0};
+  uint16_t config_descr_status_{0};
 
   uint8_t write_notify_config_descriptor_(bool enable);
 };
 
-}  // namespace bedjet
-}  // namespace esphome
+}  // namespace esphome::bedjet
 
 #endif

@@ -4,10 +4,9 @@
 
 #include <vector>
 
-namespace esphome {
-namespace ektf2232 {
+namespace esphome::ektf2232 {
 
-static const char *const TAG = "ektf2232";
+ESPHOME_LOG_TAG(TAG, "ektf2232");
 
 static const uint8_t SOFT_RESET_CMD[4] = {0x77, 0x77, 0x77, 0x77};
 static const uint8_t HELLO[4] = {0x55, 0x55, 0x55, 0x55};
@@ -21,9 +20,7 @@ void EKTF2232Touchscreen::setup() {
 
   this->attach_interrupt_(this->interrupt_pin_, gpio::INTERRUPT_FALLING_EDGE);
 
-  this->rts_pin_->setup();
-
-  this->hard_reset_();
+  pulse_reset(this->reset_pin_, {.low_ms = 15, .high_after_ms = 15});
   if (!this->soft_reset_()) {
     ESP_LOGE(TAG, "Failed to soft reset EKT2232!");
     this->interrupt_pin_->detach_interrupt();
@@ -38,12 +35,12 @@ void EKTF2232Touchscreen::setup() {
     if (err == i2c::ERROR_OK) {
       err = this->read(received, 4);
       if (err == i2c::ERROR_OK) {
-        this->x_raw_max_ = ((received[2])) | ((received[3] & 0xf0) << 4);
+        this->x_raw_max_ = encode_uint16(high_nibble(received[3]), received[2]);
         err = this->write(GET_Y_RES, 4);
         if (err == i2c::ERROR_OK) {
           err = this->read(received, 4);
           if (err == i2c::ERROR_OK) {
-            this->y_raw_max_ = ((received[2])) | ((received[3] & 0xf0) << 4);
+            this->y_raw_max_ = encode_uint16(high_nibble(received[3]), received[2]);
           }
         }
       }
@@ -77,8 +74,9 @@ void EKTF2232Touchscreen::update_touches() {
 
   for (int i = 0; i < touch_count; i++) {
     uint8_t *d = raw + 1 + (i * 3);
-    x_raw = (d[0] & 0xF0) << 4 | d[1];
-    y_raw = (d[0] & 0x0F) << 8 | d[2];
+    // d[0] holds the top 4 bits of X (high nibble) and of Y (low nibble)
+    x_raw = encode_uint16(high_nibble(d[0]), d[1]);
+    y_raw = encode_uint16(low_nibble(d[0]), d[2]);
     this->add_raw_touch_position_(i, x_raw, y_raw);
   }
 }
@@ -95,13 +93,6 @@ bool EKTF2232Touchscreen::get_power_state() {
   this->store_.touched = false;
   this->read(received, 4);
   return (received[1] >> 3) & 1;
-}
-
-void EKTF2232Touchscreen::hard_reset_() {
-  this->rts_pin_->digital_write(false);
-  delay(15);
-  this->rts_pin_->digital_write(true);
-  delay(15);
 }
 
 bool EKTF2232Touchscreen::soft_reset_() {
@@ -127,8 +118,7 @@ void EKTF2232Touchscreen::dump_config() {
   ESP_LOGCONFIG(TAG, "EKT2232 Touchscreen:");
   LOG_I2C_DEVICE(this);
   LOG_PIN("  Interrupt Pin: ", this->interrupt_pin_);
-  LOG_PIN("  RTS Pin: ", this->rts_pin_);
+  LOG_PIN("  Reset Pin: ", this->reset_pin_);
 }
 
-}  // namespace ektf2232
-}  // namespace esphome
+}  // namespace esphome::ektf2232

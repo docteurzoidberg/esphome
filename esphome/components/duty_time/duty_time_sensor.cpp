@@ -1,14 +1,18 @@
 #include "duty_time_sensor.h"
 #include "esphome/core/hal.h"
+#include "esphome/core/optional.h"
 
-namespace esphome {
-namespace duty_time_sensor {
+namespace esphome::duty_time_sensor {
 
-static const char *const TAG = "duty_time_sensor";
+ESPHOME_LOG_TAG(TAG, "duty_time_sensor");
 
 #ifdef USE_BINARY_SENSOR
 void DutyTimeSensor::set_sensor(binary_sensor::BinarySensor *const sensor) {
-  sensor->add_on_state_callback([this](bool state) { this->process_state_(state); });
+  // Every change, the first state too: an on_state callback skips it unless trigger_on_initial_state is set
+  sensor->add_full_state_callback([this](optional<bool> /*previous*/, optional<bool> state) {
+    if (state.has_value())
+      this->process_state_(*state);
+  });
 }
 #endif
 
@@ -28,9 +32,6 @@ void DutyTimeSensor::update() {
 }
 
 void DutyTimeSensor::loop() {
-  if (this->func_ == nullptr)
-    return;
-
   const bool state = this->func_();
 
   if (state != this->last_state_)
@@ -41,14 +42,17 @@ void DutyTimeSensor::setup() {
   uint32_t seconds = 0;
 
   if (this->restore_) {
-    this->pref_ = global_preferences->make_preference<uint32_t>(this->get_object_id_hash());
+    this->pref_ = this->make_entity_preference<uint32_t>();
     this->pref_.load(&seconds);
   }
 
-  this->set_value_(seconds);
+  this->set_value(seconds);
+  // Only a lambda is polled; a binary sensor source reports through its callback
+  if (this->func_ == nullptr)
+    this->disable_loop();
 }
 
-void DutyTimeSensor::set_value_(const uint32_t sec) {
+void DutyTimeSensor::set_value(const uint32_t sec) {
   this->last_time_ = 0;
   if (this->last_state_)
     this->last_time_ = millis();  // last time with 0 ms correction
@@ -71,10 +75,7 @@ void DutyTimeSensor::process_state_(const bool state) {
       this->last_time_ = ms;  // temporary store ms correction only
       this->last_state_ = false;
 
-      if (this->last_duty_time_sensor_ != nullptr) {
-        const uint32_t turn_on_ms = now - this->edge_time_;
-        this->last_duty_time_sensor_->publish_state(turn_on_ms * 1e-3f);
-      }
+      PUBLISH_STATE(this->last_duty_time_sensor_, (now - this->edge_time_) * 1e-3f);
     }
 
   } else if (state) {
@@ -103,5 +104,4 @@ void DutyTimeSensor::dump_config() {
   LOG_SENSOR("  ", "Last Duty Time Sensor:", this->last_duty_time_sensor_);
 }
 
-}  // namespace duty_time_sensor
-}  // namespace esphome
+}  // namespace esphome::duty_time_sensor

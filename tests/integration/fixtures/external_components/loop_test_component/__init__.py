@@ -19,6 +19,7 @@ CONF_TEST_REDUNDANT_OPERATIONS = "test_redundant_operations"
 CONF_ISR_COMPONENTS = "isr_components"
 CONF_UPDATE_COMPONENTS = "update_components"
 CONF_DISABLE_LOOP_AFTER = "disable_loop_after"
+CONF_FAIL_BEFORE_SETUP = "fail_before_setup"
 
 COMPONENT_CONFIG_SCHEMA = cv.Schema(
     {
@@ -26,6 +27,7 @@ COMPONENT_CONFIG_SCHEMA = cv.Schema(
         cv.Required(CONF_NAME): cv.string,
         cv.Optional(CONF_DISABLE_AFTER, default=0): cv.int_,
         cv.Optional(CONF_TEST_REDUNDANT_OPERATIONS, default=False): cv.boolean,
+        cv.Optional(CONF_FAIL_BEFORE_SETUP, default=False): cv.boolean,
     }
 )
 
@@ -72,8 +74,7 @@ DisableAction = loop_test_component_ns.class_("DisableAction", automation.Action
 )
 async def enable_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
-    var = cg.new_Pvariable(action_id, template_arg, parent)
-    return var
+    return cg.new_Pvariable(action_id, template_arg, parent)
 
 
 @automation.register_action(
@@ -87,8 +88,7 @@ async def enable_to_code(config, action_id, template_arg, args):
 )
 async def disable_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
-    var = cg.new_Pvariable(action_id, template_arg, parent)
-    return var
+    return cg.new_Pvariable(action_id, template_arg, parent)
 
 
 async def to_code(config):
@@ -105,6 +105,8 @@ async def to_code(config):
                 comp_config[CONF_TEST_REDUNDANT_OPERATIONS]
             )
         )
+        if comp_config[CONF_FAIL_BEFORE_SETUP]:
+            cg.add(var.mark_failed())
 
     # Create ISR test components
     for isr_config in config.get(CONF_ISR_COMPONENTS, []):

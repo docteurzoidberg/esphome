@@ -2,16 +2,18 @@
 
 #include "esphome/core/component.h"
 #include "esphome/components/uart/uart.h"
+#ifdef USE_VBUS_DATAGRAM
+#include "esphome/core/helpers.h"
+#endif
 
-namespace esphome {
-namespace vbus {
-
-using message_parser_t = std::function<float(std::vector<uint8_t> &)>;
+namespace esphome::vbus {
 
 class VBus;
 
 class VBusListener {
  public:
+  // Called from the hub's dump_config(); not dump_config() so Component children don't print twice
+  virtual void dump_child_config() {}
   void set_command(uint16_t command) { this->command_ = command; }
   void set_source(uint16_t source) { this->source_ = source; }
   void set_dest(uint16_t dest) { this->dest_ = dest; }
@@ -26,12 +28,17 @@ class VBusListener {
   virtual void handle_message(std::vector<uint8_t> &message) = 0;
 };
 
-class VBus : public uart::UARTDevice, public Component {
+class VBus final : public uart::UARTDevice, public Component {
  public:
   void dump_config() override;
   void loop() override;
 
   void register_listener(VBusListener *listener) { this->listeners_.push_back(listener); }
+#ifdef USE_VBUS_DATAGRAM
+  template<typename F> void add_on_datagram_callback(F &&callback) {
+    this->datagram_callback_.add(std::forward<F>(callback));
+  }
+#endif
 
  protected:
   int state_{0};
@@ -45,7 +52,9 @@ class VBus : public uart::UARTDevice, public Component {
   uint8_t fbytes_[6];
   int fbcount_;
   std::vector<VBusListener *> listeners_{};
+#ifdef USE_VBUS_DATAGRAM
+  CallbackManager<void(uint16_t, uint16_t, uint16_t, uint16_t, uint32_t)> datagram_callback_;
+#endif
 };
 
-}  // namespace vbus
-}  // namespace esphome
+}  // namespace esphome::vbus

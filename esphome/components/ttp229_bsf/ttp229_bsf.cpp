@@ -1,15 +1,13 @@
 #include "ttp229_bsf.h"
 #include "esphome/core/log.h"
 
-namespace esphome {
-namespace ttp229_bsf {
+namespace esphome::ttp229_bsf {
 
-static const char *const TAG = "ttp229_bsf";
+ESPHOME_LOG_TAG(TAG, "ttp229_bsf");
 
 void TTP229BSFComponent::setup() {
   this->sdo_pin_->setup();
-  this->scl_pin_->setup();
-  this->scl_pin_->digital_write(true);
+  setup_output_pin(this->scl_pin_, true);
   delay(2);
 }
 void TTP229BSFComponent::dump_config() {
@@ -18,5 +16,4 @@ void TTP229BSFComponent::dump_config() {
   LOG_PIN("  SDO pin: ", this->sdo_pin_);
 }
 
-}  // namespace ttp229_bsf
-}  // namespace esphome
+}  // namespace esphome::ttp229_bsf

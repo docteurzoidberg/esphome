@@ -1,10 +1,13 @@
 #include "uln2003.h"
 #include "esphome/core/log.h"
+#include "esphome/core/progmem.h"
 
-namespace esphome {
-namespace uln2003 {
+namespace esphome::uln2003 {
 
-static const char *const TAG = "uln2003.stepper";
+ESPHOME_LOG_TAG(TAG, "uln2003.stepper");
+
+// Indexed by ULN2003StepMode
+PROGMEM_STRING_TABLE(StepModeStrings, "FULL STEP", "HALF STEP", "WAVE DRIVE", "UNKNOWN");
 
 void ULN2003::setup() {
   this->pin_a_->setup();
@@ -15,9 +18,9 @@ void ULN2003::setup() {
 }
 void ULN2003::loop() {
   int dir = this->should_step_();
-  if (dir == 0 && this->has_reached_target()) {
-    this->high_freq_.stop();
-
+  const bool done = dir == 0 && this->has_reached_target();
+  this->high_freq_.set(!done);
+  if (done) {
     if (this->sleep_when_done_) {
       this->pin_a_->digital_write(false);
       this->pin_b_->digital_write(false);
@@ -27,35 +30,21 @@ void ULN2003::loop() {
       return;
     }
   } else {
-    this->high_freq_.start();
     this->current_uln_pos_ += dir;
   }
 
   this->write_step_(this->current_uln_pos_);
 }
 void ULN2003::dump_config() {
-  ESP_LOGCONFIG(TAG, "ULN2003:");
+  ESP_LOGCONFIG(TAG,
+                "ULN2003:\n"
+                "  Sleep when done: %s",
+                YESNO(this->sleep_when_done_));
   LOG_PIN("  Pin A: ", this->pin_a_);
   LOG_PIN("  Pin B: ", this->pin_b_);
   LOG_PIN("  Pin C: ", this->pin_c_);
   LOG_PIN("  Pin D: ", this->pin_d_);
-  ESP_LOGCONFIG(TAG, "  Sleep when done: %s", YESNO(this->sleep_when_done_));
-  const char *step_mode_s;
-  switch (this->step_mode_) {
-    case ULN2003_STEP_MODE_FULL_STEP:
-      step_mode_s = "FULL STEP";
-      break;
-    case ULN2003_STEP_MODE_HALF_STEP:
-      step_mode_s = "HALF STEP";
-      break;
-    case ULN2003_STEP_MODE_WAVE_DRIVE:
-      step_mode_s = "WAVE DRIVE";
-      break;
-    default:
-      step_mode_s = "UNKNOWN";
-      break;
-  }
-  ESP_LOGCONFIG(TAG, "  Step Mode: %s", step_mode_s);
+  ESP_LOGCONFIG(TAG, "  Step Mode: %s", LOG_STR_ARG(StepModeStrings::get_log_str(this->step_mode_)));
 }
 void ULN2003::write_step_(int32_t step) {
   int32_t n = this->step_mode_ == ULN2003_STEP_MODE_HALF_STEP ? 8 : 4;
@@ -88,5 +77,4 @@ void ULN2003::write_step_(int32_t step) {
   this->pin_d_->digital_write((res >> 3) & 1);
 }
 
-}  // namespace uln2003
-}  // namespace esphome
+}  // namespace esphome::uln2003

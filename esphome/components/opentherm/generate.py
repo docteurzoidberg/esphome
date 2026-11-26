@@ -16,7 +16,7 @@ def define_has_component(component_type: str, keys: list[str]) -> None:
     cg.add_define(
         f"OPENTHERM_{component_type.upper()}_LIST(F, sep)",
         cg.RawExpression(
-            " sep ".join(map(lambda key: f"F({key}_{component_type.lower()})", keys))
+            " sep ".join(f"F({key}_{component_type.lower()})" for key in keys)
         ),
     )
     for key in keys:
@@ -30,10 +30,8 @@ def define_has_settings(keys: list[str], schemas: dict[str, SettingSchema]) -> N
         "OPENTHERM_SETTING_LIST(F, sep)",
         cg.RawExpression(
             " sep ".join(
-                map(
-                    lambda key: f"F({schemas[key].backing_type}, {key}_setting, {schemas[key].default_value})",
-                    keys,
-                )
+                f"F({schemas[key].backing_type}, {key}_setting, {schemas[key].default_value})"
+                for key in keys
             )
         ),
     )
@@ -120,8 +118,7 @@ def add_messages(hub: cg.MockObj, keys: list[str], schemas: dict[str, TSchema]):
 
 
 def add_property_set(var: cg.MockObj, config_key: str, config: dict[str, Any]) -> None:
-    if config_key in config:
-        cg.add(getattr(var, f"set_{config_key}")(config[config_key]))
+    cg.add_optional(getattr(var, f"set_{config_key}"), config.get(config_key))
 
 
 Create = Callable[[dict[str, Any], str, cg.MockObj], Awaitable[cg.Pvariable]]

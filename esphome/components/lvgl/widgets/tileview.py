@@ -15,10 +15,10 @@ from ..defines import (
     TILE_DIRECTIONS,
     literal,
 )
-from ..lv_validation import animated, lv_int
-from ..lvcode import lv, lv_assign, lv_expr, lv_obj, lv_Pvariable
+from ..lv_validation import animated, lv_int, pixels_or_percent
+from ..lvcode import lv, lv_assign, lv_expr, lv_global, lv_obj, lv_Pvariable
 from ..schemas import container_schema
-from ..types import LV_EVENT, LvType, ObjUpdateAction, lv_obj_t, lv_obj_t_ptr
+from ..types import LV_EVENT, LvType, lv_obj_t, lv_obj_t_ptr
 from . import Widget, WidgetType, add_widgets, get_widgets, set_obj_properties
 from .obj import obj_spec
 
@@ -29,7 +29,7 @@ lv_tile_t = LvType("lv_tileview_tile_t")
 lv_tileview_t = LvType(
     "lv_tileview_t",
     largs=[(lv_obj_t_ptr, "tile")],
-    lvalue=lambda w: w.get_property("tile_act"),
+    lvalue=lambda w: w.get_property("tile_active"),
     has_on_value=True,
 )
 
@@ -41,8 +41,8 @@ TILEVIEW_SCHEMA = cv.Schema(
             container_schema(
                 obj_spec,
                 {
-                    cv.Required(CONF_ROW): lv_int,
-                    cv.Required(CONF_COLUMN): lv_int,
+                    cv.Required(CONF_ROW): cv.positive_int,
+                    cv.Required(CONF_COLUMN): cv.positive_int,
                     cv.GenerateID(): cv.declare_id(lv_tile_t),
                     cv.Optional(CONF_DIR, default="ALL"): TILE_DIRECTIONS.several_of,
                 },
@@ -63,21 +63,31 @@ class TileviewType(WidgetType):
         )
 
     async def to_code(self, w: Widget, config: dict):
-        for tile_conf in config.get(CONF_TILES, ()):
+        tiles = config[CONF_TILES]
+        for tile_conf in tiles:
             w_id = tile_conf[CONF_ID]
             tile_obj = lv_Pvariable(lv_obj_t, w_id)
             tile = Widget.create(w_id, tile_obj, tile_spec, tile_conf)
-            dirs = tile_conf[CONF_DIR]
-            if isinstance(dirs, list):
-                dirs = "|".join(dirs)
+            dirs = await TILE_DIRECTIONS.process(tile_conf[CONF_DIR])
+            row_pos = tile_conf[CONF_ROW]
+            col_pos = tile_conf[CONF_COLUMN]
             lv_assign(
                 tile_obj,
-                lv_expr.tileview_add_tile(
-                    w.obj, tile_conf[CONF_COLUMN], tile_conf[CONF_ROW], literal(dirs)
-                ),
+                lv_expr.tileview_add_tile(w.obj, col_pos, row_pos, dirs),
+            )
+            # Bugfix for LVGL 8.x
+            lv_obj.set_pos(
+                tile_obj,
+                await pixels_or_percent.process(float(col_pos)),
+                await pixels_or_percent.process(float(row_pos)),
             )
             await set_obj_properties(tile, tile_conf)
             await add_widgets(tile, tile_conf)
+        if tiles:
+            # Set the first tile as active
+            lv.tileview_set_tile_by_index(
+                w.obj, tiles[0][CONF_COLUMN], tiles[0][CONF_ROW], literal("LV_ANIM_OFF")
+            )
 
 
 tileview_spec = TileviewType()
@@ -94,7 +104,7 @@ def tile_select_validate(config):
 
 @automation.register_action(
     "lvgl.tileview.select",
-    ObjUpdateAction,
+    automation.ApplyAction,
     cv.Schema(
         {
             cv.Required(CONF_ID): cv.use_id(lv_tileview_t),
@@ -104,20 +114,21 @@ def tile_select_validate(config):
             cv.Optional(CONF_TILE_ID): cv.use_id(lv_tile_t),
         },
     ).add_extra(tile_select_validate),
+    synchronous=True,
 )
 async def tileview_select(config, action_id, template_arg, args):
     widgets = await get_widgets(config)
 
     async def do_select(w: Widget):
         if tile := config.get(CONF_TILE_ID):
-            tile = await cg.get_variable(tile)
-            lv_obj.set_tile(w.obj, tile, literal(config[CONF_ANIMATED]))
+            tile = await lv_global(tile)
+            lv.tileview_set_tile(w.obj, tile, literal(config[CONF_ANIMATED]))
         else:
             row = await lv_int.process(config[CONF_ROW])
             column = await lv_int.process(config[CONF_COLUMN])
-            lv_obj.set_tile_id(
+            lv.tileview_set_tile_by_index(
                 widgets[0].obj, column, row, literal(config[CONF_ANIMATED])
             )
-        lv.event_send(w.obj, LV_EVENT.VALUE_CHANGED, cg.nullptr)
+        lv_obj.send_event(w.obj, LV_EVENT.VALUE_CHANGED, cg.nullptr)
 
     return await action_to_code(widgets, do_select, action_id, template_arg, args)
